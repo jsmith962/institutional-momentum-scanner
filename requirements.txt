@@ -1,0 +1,6 @@
+streamlit>=1.40
+pandas>=2.2
+numpy>=1.26
+python-dotenv>=1.0
+alpaca-py>=0.40
+plotly>=5.24
