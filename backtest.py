@@ -1,12 +1,12 @@
 import pandas as pd
 import numpy as np
-from strategy import prepare_day, signal
+from strategy import prepare_intraday, classify
 
-def backtest(bars, spy_bars, starting_capital=2000, risk_pct=.01, reward_risk=2.0,
-             max_daily_loss=.03, commission=0.0):
+def backtest(bars, spy_bars, starting_capital=2000, risk_pct=.01,
+             reward_risk=2.0, commission=0.0):
     capital = float(starting_capital)
-    equity = []
-    trades = []
+    equity, trades = [], []
+
     bars = bars.copy()
     bars["date"] = pd.to_datetime(bars["timestamp"], utc=True).dt.date
     spy_bars = spy_bars.copy()
@@ -14,14 +14,11 @@ def backtest(bars, spy_bars, starting_capital=2000, risk_pct=.01, reward_risk=2.
 
     for date, day_all in bars.groupby("date"):
         spy_day = spy_bars[spy_bars["date"] == date]
-        daily_start = capital
-        day_trades = 0
         for symbol, day in day_all.groupby("symbol"):
-            d = prepare_day(day, spy_day)
-            if len(d) < 30: continue
+            d = prepare_intraday(day, spy_day)
+            if len(d) < 30:
+                continue
             in_trade = False
-            entry = stop = target = qty = None
-            entry_time = None
             for i in range(15, len(d)):
                 r = d.iloc[i]
                 if in_trade:
@@ -32,68 +29,57 @@ def backtest(bars, spy_bars, starting_capital=2000, risk_pct=.01, reward_risk=2.
                         pnl = (exit_price-entry)*qty - commission
                         capital += pnl
                         trades.append({
-                            "date": date, "symbol": symbol, "entry_time": entry_time,
-                            "exit_time": r["timestamp"], "entry": entry,
-                            "exit": exit_price, "qty": qty, "pnl": pnl,
-                            "return_pct": pnl/(entry*qty) if entry*qty else 0,
-                            "reason": "stop" if hit_stop else "target"
+                            "date":date,"symbol":symbol,"entry_time":entry_time,
+                            "exit_time":r["timestamp"],"entry":entry,"exit":exit_price,
+                            "qty":qty,"pnl":pnl,"reason":"stop" if hit_stop else "target"
                         })
                         in_trade = False
-                        day_trades += 1
                         break
                 else:
-                    score, sig, reasons = signal(r)
-                    if sig == "BUY" and r["atr"] > 0:
+                    score, sig, _ = classify(r)
+                    if sig == "BUY" and pd.notna(r["atr"]) and r["atr"] > 0:
                         entry = float(r["close"])
                         stop = entry - 1.25*float(r["atr"])
-                        risk_per_share = entry-stop
-                        if risk_per_share <= 0: continue
-                        risk_dollars = capital*risk_pct
-                        qty = int(risk_dollars/risk_per_share)
-                        qty = min(qty, int(capital/entry))
-                        if qty <= 0: continue
-                        target = entry + reward_risk*risk_per_share
+                        per_share_risk = entry-stop
+                        qty = min(int((capital*risk_pct)/max(per_share_risk,.01)),
+                                  int(capital/entry))
+                        if qty <= 0:
+                            continue
+                        target = entry + reward_risk*per_share_risk
                         entry_time = r["timestamp"]
                         in_trade = True
-            # close any open position at final bar
             if in_trade:
-                r = d.iloc[-1]
-                exit_price = float(r["close"])
+                last = d.iloc[-1]
+                exit_price = float(last["close"])
                 pnl = (exit_price-entry)*qty - commission
                 capital += pnl
                 trades.append({
-                    "date": date, "symbol": symbol, "entry_time": entry_time,
-                    "exit_time": r["timestamp"], "entry": entry,
-                    "exit": exit_price, "qty": qty, "pnl": pnl,
-                    "return_pct": pnl/(entry*qty) if entry*qty else 0,
-                    "reason": "EOD"
+                    "date":date,"symbol":symbol,"entry_time":entry_time,
+                    "exit_time":last["timestamp"],"entry":entry,"exit":exit_price,
+                    "qty":qty,"pnl":pnl,"reason":"EOD"
                 })
-        if daily_start > 0 and (capital/daily_start-1) <= -max_daily_loss:
-            pass
-        equity.append({"date": date, "equity": capital})
+        equity.append({"date":date,"equity":capital})
 
     trades_df = pd.DataFrame(trades)
     eq = pd.DataFrame(equity)
     if eq.empty:
-        return {"trades": trades_df, "equity": eq, "stats": {}}
+        return {"trades":trades_df,"equity":eq,"stats":{}}
 
     peak = eq["equity"].cummax()
-    drawdown = eq["equity"]/peak - 1
+    dd = eq["equity"]/peak - 1
     n = len(trades_df)
-    wins = trades_df[trades_df["pnl"] > 0] if n else pd.DataFrame()
-    losses = trades_df[trades_df["pnl"] < 0] if n else pd.DataFrame()
-    profit_factor = wins["pnl"].sum()/abs(losses["pnl"].sum()) if len(losses) and losses["pnl"].sum() else np.inf
-    days = max(1, (eq["date"].iloc[-1] - eq["date"].iloc[0]).days)
-    cagr = (capital/starting_capital)**(365/days)-1 if capital > 0 else -1
+    wins = trades_df[trades_df["pnl"]>0] if n else pd.DataFrame()
+    losses = trades_df[trades_df["pnl"]<0] if n else pd.DataFrame()
+    pf = wins["pnl"].sum()/abs(losses["pnl"].sum()) if len(losses) and losses["pnl"].sum() else np.inf
+
     stats = {
-        "starting_capital": starting_capital,
-        "ending_capital": round(capital,2),
-        "total_return_pct": round((capital/starting_capital-1)*100,2),
-        "cagr_pct": round(cagr*100,2),
-        "trades": n,
-        "win_rate_pct": round(len(wins)/n*100,2) if n else 0,
-        "profit_factor": round(profit_factor,2) if np.isfinite(profit_factor) else "inf",
-        "avg_trade_dollars": round(trades_df["pnl"].mean(),2) if n else 0,
-        "max_drawdown_pct": round(drawdown.min()*100,2),
+        "starting_capital":round(starting_capital,2),
+        "ending_capital":round(capital,2),
+        "total_return_pct":round((capital/starting_capital-1)*100,2),
+        "trades":n,
+        "win_rate_pct":round(len(wins)/n*100,2) if n else 0,
+        "profit_factor":round(pf,2) if np.isfinite(pf) else "inf",
+        "avg_trade_dollars":round(trades_df["pnl"].mean(),2) if n else 0,
+        "max_drawdown_pct":round(dd.min()*100,2)
     }
-    return {"trades": trades_df, "equity": eq, "stats": stats}
+    return {"trades":trades_df,"equity":eq,"stats":stats}
