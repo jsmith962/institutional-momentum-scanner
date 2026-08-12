@@ -4,3 +4,5 @@ numpy>=1.26
 python-dotenv>=1.0
 alpaca-py>=0.40
 plotly>=5.24
+
+twilio>=9.0

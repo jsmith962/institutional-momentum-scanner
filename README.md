@@ -1,15 +1,22 @@
-# Institutional Momentum Scanner v2.1
+# Institutional Momentum Scanner v2.3
 
-This update fixes the main weakness in v2: it no longer scans only the first symbols alphabetically.
+Version 2.3 adds SMS alerts using Twilio.
 
-New scan flow:
-1. Discover all active tradable U.S. equities.
-2. Pull recent daily bars in batches.
-3. Remove illiquid / low-priced names.
-4. Rank by momentum, volume surge and dollar liquidity.
-5. Keep the strongest finalists.
-6. Pull 1-minute bars only for those finalists.
-7. Apply VWAP, opening-range breakout, relative volume, EMA trend, RSI and SPY-relative-strength scoring.
-8. Show BUY / WATCH / NO BUY candidates.
+## SMS behavior
+- BUY texts: sent for qualifying BUY candidates when you run the scanner.
+- SELL texts: evaluated only for symbols you enter under **Tracked positions**.
+- Current SELL-risk rule: a tracked stock is `NO BUY` and has lost VWAP and/or its score has fallen below 60.
+- This version does **not** place orders.
 
-Research / paper-testing only. No live orders.
+## Streamlit Secrets
+Add these to the same Streamlit Secrets area where your Alpaca keys are stored:
+
+TWILIO_ACCOUNT_SID = "..."
+TWILIO_AUTH_TOKEN = "..."
+TWILIO_FROM_NUMBER = "+1..."
+ALERT_TO_NUMBER = "+1..."
+
+Keep your existing Alpaca secrets too.
+
+## Important limitation
+Streamlit Community Cloud can hibernate inactive apps. SMS alerts in this version happen when the scanner actually runs. For truly continuous background alerts while the app is closed, deploy the scanner worker to an always-on scheduler/server in a later version.
