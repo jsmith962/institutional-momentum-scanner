@@ -113,11 +113,94 @@ def signal_icon(signal):
     return "⚪"
 
 
+def why_not_buy(row):
+    signal = row.get("signal", "")
+
+    if signal in ["A+ SWING BUY", "BUY"]:
+        return "All required BUY gates passed."
+
+    if signal == "TOO EXTENDED":
+        return (
+            "The stock is too extended from its preferred entry. "
+            "Wait for a pullback or retest."
+        )
+
+    if signal == "AVOID":
+        return (
+            "The setup does not currently meet enough of the "
+            "high-probability swing requirements."
+        )
+
+    failures = []
+
+    try:
+        swing_score = float(row.get("swing_score", 0))
+    except Exception:
+        swing_score = 0
+
+    try:
+        entry_quality = float(row.get("entry_quality", 0))
+    except Exception:
+        entry_quality = 0
+
+    try:
+        reward_risk = float(row.get("reward_risk", 0))
+    except Exception:
+        reward_risk = 0
+
+    try:
+        price = float(row.get("price", 0))
+        entry_low = float(row.get("entry_low", 0))
+        entry_high = float(row.get("entry_high", 0))
+
+        inside_entry_zone = (
+            entry_low <= price <= entry_high
+        )
+
+    except Exception:
+        inside_entry_zone = False
+
+    if swing_score < 85:
+        failures.append(
+            f"Swing Score {swing_score:.1f} is below the 85 BUY threshold"
+        )
+
+    if entry_quality < 10:
+        failures.append(
+            f"Entry Quality {entry_quality:.1f}/15 is below the 10/15 BUY requirement"
+        )
+
+    if reward_risk < 2:
+        failures.append(
+            f"Reward/Risk {reward_risk:.2f}:1 is below the required 2.00:1"
+        )
+
+    if not inside_entry_zone:
+        failures.append(
+            "Current price is outside the preferred entry zone"
+        )
+
+    if not failures and signal == "WATCH":
+        failures.append(
+            "Visible price, score and risk gates pass, but the broader "
+            "market/regime confirmation has not yet passed the BUY requirement"
+        )
+
+    if not failures:
+        return "Waiting for additional confirmation."
+
+    return " • ".join(failures)
+
+
 def render_trade_card(row, rank_num=None):
     symbol = row["symbol"]
     signal = row["signal"]
 
-    title_prefix = f"#{rank_num} " if rank_num is not None else ""
+    title_prefix = (
+        f"#{rank_num} "
+        if rank_num is not None
+        else ""
+    )
 
     with st.container(border=True):
         st.markdown(
@@ -166,16 +249,43 @@ def render_trade_card(row, rank_num=None):
         st.markdown("#### Action")
 
         if signal in ["A+ SWING BUY", "BUY"]:
-            st.success(action_text(signal))
+            st.success(
+                action_text(signal)
+            )
 
         elif signal == "WATCH":
-            st.warning(action_text(signal))
+            st.warning(
+                action_text(signal)
+            )
 
         elif signal == "TOO EXTENDED":
-            st.error(action_text(signal))
+            st.error(
+                action_text(signal)
+            )
 
         else:
-            st.info(action_text(signal))
+            st.info(
+                action_text(signal)
+            )
+
+        if signal not in ["A+ SWING BUY", "BUY"]:
+            st.markdown(
+                "#### Why Not BUY Yet?"
+            )
+
+            st.info(
+                why_not_buy(row)
+            )
+
+        else:
+            st.markdown(
+                "#### Why BUY?"
+            )
+
+            st.success(
+                "Swing score, entry quality, reward/risk, entry zone "
+                "and market confirmation all passed the BUY rules."
+            )
 
         st.caption(
             f"Intraday confirmation: "
@@ -289,17 +399,11 @@ with tab1:
 
         try:
 
-            # =================================================
-            # STEP 1
-            # ELIGIBLE U.S. STOCK UNIVERSE
-            # =================================================
-
             status.write(
                 "1/5 Filtering eligible U.S. securities..."
             )
 
             elig = eligible_us_equity_universe()
-
             universe = elig.symbol.tolist()
 
             status.write(
@@ -307,14 +411,7 @@ with tab1:
             )
 
             now = datetime.now(ET)
-
             daily_start = now - timedelta(days=45)
-
-
-            # =================================================
-            # STEP 2
-            # FAST FULL-MARKET PREFILTER
-            # =================================================
 
             status.write(
                 "2/5 Applying price, liquidity, trend and momentum filters..."
@@ -373,18 +470,11 @@ with tab1:
 
             progress.progress(45)
 
-
-            # =================================================
-            # STEP 3
-            # LONGER DAILY HISTORY
-            # =================================================
-
             status.write(
                 "3/5 Pulling longer daily history for swing-trade analysis..."
             )
 
             finalist_symbols = finalists.symbol.tolist()
-
             swing_start = now - timedelta(days=420)
 
             swing_daily = get_bars_batched(
@@ -418,12 +508,6 @@ with tab1:
                 )
 
             progress.progress(60)
-
-
-            # =================================================
-            # STEP 4
-            # INTRADAY DATA
-            # =================================================
 
             status.write(
                 "4/5 Pulling intraday bars for finalists and SPY..."
@@ -513,12 +597,6 @@ with tab1:
                 )
             )
 
-
-            # =================================================
-            # STEP 5
-            # SCORE EACH FINALIST
-            # =================================================
-
             status.write(
                 "5/5 Applying intraday confirmation, swing setup, "
                 "entry quality and risk rules..."
@@ -558,11 +636,6 @@ with tab1:
                     else None
                 )
 
-
-                # ---------------------------------------------
-                # INTRADAY ANALYSIS
-                # ---------------------------------------------
-
                 p = prepare_intraday(
                     d,
                     spy_today,
@@ -582,11 +655,6 @@ with tab1:
                     ),
                 )
 
-
-                # ---------------------------------------------
-                # SWING ANALYSIS
-                # ---------------------------------------------
-
                 stock_swing_daily = pd.DataFrame()
 
                 if not swing_daily.empty:
@@ -602,11 +670,6 @@ with tab1:
                         spy_daily,
                     )
 
-
-                # ---------------------------------------------
-                # DEFAULT SWING VALUES
-                # ---------------------------------------------
-
                 swing_signal = "N/A"
                 swing_score = 0
                 setup = ""
@@ -619,11 +682,6 @@ with tab1:
                 reward_risk = None
                 swing_rsi = None
                 swing_rvol = None
-
-
-                # ---------------------------------------------
-                # LOAD SWING RESULTS
-                # ---------------------------------------------
 
                 if swing:
 
@@ -679,20 +737,10 @@ with tab1:
                         "rvol"
                     )
 
-
-                # ---------------------------------------------
-                # FINAL DECISION
-                # ---------------------------------------------
-
                 if swing:
                     final_signal = swing_signal
                 else:
                     final_signal = intraday_signal
-
-
-                # ---------------------------------------------
-                # EXPLANATION
-                # ---------------------------------------------
 
                 if final_signal == "A+ SWING BUY":
 
@@ -727,54 +775,33 @@ with tab1:
                     )
 
                 else:
-
                     decision_reason = "; ".join(
                         reasons
                     )
 
-
-                # ---------------------------------------------
-                # SAVE RESULT
-                # ---------------------------------------------
-
                 rows.append(
                     {
                         "symbol": sym,
-
                         "name": ref.get(
                             "name",
                             "",
                         ),
-
                         "signal": final_signal,
-
                         "swing_score": swing_score,
-
                         "setup": setup,
-
                         "entry_quality": entry_quality,
-
                         "price": round(
                             float(r.close),
                             2,
                         ),
-
                         "entry_low": entry_low,
-
                         "entry_high": entry_high,
-
                         "stop": stop,
-
                         "target1": target1,
-
                         "target2": target2,
-
                         "reward_risk": reward_risk,
-
                         "intraday_signal": intraday_signal,
-
                         "intraday_score": intraday_score,
-
                         "change_today_%": round(
                             float(
                                 r.get(
@@ -785,7 +812,6 @@ with tab1:
                             * 100,
                             2,
                         ),
-
                         "rel_volume": round(
                             float(
                                 r.get(
@@ -795,25 +821,20 @@ with tab1:
                             ),
                             2,
                         ),
-
                         "vwap": round(
                             float(
                                 r.vwap
                             ),
                             2,
                         ),
-
                         "intraday_rsi": round(
                             float(r.rsi)
                             if pd.notna(r.rsi)
                             else 50,
                             1,
                         ),
-
                         "swing_rsi": swing_rsi,
-
                         "swing_rvol": swing_rvol,
-
                         "vs_SPY_%": round(
                             float(
                                 r.get(
@@ -824,30 +845,19 @@ with tab1:
                             * 100,
                             2,
                         ),
-
                         "security_type": ref.get(
                             "security_type",
                             "Common-stock candidate",
                         ),
-
                         "type_check": "PASS",
-
                         "price_check": "PASS",
-
                         "liquidity_check": "PASS",
-
                         "decision": decision_reason,
-
                         "intraday_reasons": "; ".join(
                             reasons
                         ),
                     }
                 )
-
-
-            # =================================================
-            # BUILD FINAL TABLE
-            # =================================================
 
             out = pd.DataFrame(
                 rows
@@ -908,11 +918,6 @@ with tab1:
                     )
                 )
 
-
-                # =================================================
-                # SIGNAL GROUPS
-                # =================================================
-
                 buys = out[
                     out["signal"].isin(
                         [
@@ -938,11 +943,6 @@ with tab1:
                         ]
                     )
                 ]
-
-
-                # =================================================
-                # SMS ALERTS
-                # =================================================
 
                 if (
                     sms_enabled
@@ -1083,11 +1083,6 @@ with tab1:
                             + ", ".join(sent)
                         )
 
-
-                # =================================================
-                # SUMMARY
-                # =================================================
-
                 st.divider()
 
                 st.subheader(
@@ -1119,11 +1114,6 @@ with tab1:
                         "the signal to BUY or A+ SWING BUY."
                     )
 
-
-                # =================================================
-                # MOBILE SUMMARY METRICS
-                # =================================================
-
                 m1, m2 = st.columns(2)
 
                 m1.metric(
@@ -1147,11 +1137,6 @@ with tab1:
                     "TOO EXTENDED",
                     len(extended),
                 )
-
-
-                # =================================================
-                # TOP 5 MOBILE OPPORTUNITIES
-                # =================================================
 
                 st.divider()
 
@@ -1178,11 +1163,6 @@ with tab1:
                         rank_num,
                     )
 
-
-                # =================================================
-                # CONFIRMED BUYS
-                # =================================================
-
                 st.divider()
 
                 st.header(
@@ -1206,11 +1186,6 @@ with tab1:
                     st.info(
                         "No confirmed BUY signals right now."
                     )
-
-
-                # =================================================
-                # TOO EXTENDED
-                # =================================================
 
                 st.divider()
 
@@ -1240,11 +1215,6 @@ with tab1:
                     st.write(
                         "None."
                     )
-
-
-                # =================================================
-                # WATCH LIST
-                # =================================================
 
                 st.divider()
 
@@ -1277,11 +1247,6 @@ with tab1:
                     st.write(
                         "None."
                     )
-
-
-                # =================================================
-                # INDIVIDUAL STOCK DETAILS
-                # =================================================
 
                 st.divider()
 
@@ -1322,11 +1287,6 @@ with tab1:
                     f"**Decision reason:** "
                     f"{selected['decision']}"
                 )
-
-
-                # =================================================
-                # FULL RESEARCH TABLE
-                # =================================================
 
                 st.divider()
 
@@ -1370,11 +1330,6 @@ with tab1:
                         hide_index=True,
                     )
 
-
-                # =================================================
-                # DOWNLOAD
-                # =================================================
-
                 st.download_button(
                     "Download latest swing scan",
                     data=out.to_csv(
@@ -1386,7 +1341,6 @@ with tab1:
                     mime="text/csv",
                     width="stretch",
                 )
-
 
         except Exception as e:
 
