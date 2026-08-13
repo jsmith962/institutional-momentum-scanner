@@ -46,9 +46,8 @@ st.set_page_config(
 st.title("Institutional Swing Scanner v3")
 
 st.caption(
-    "Full U.S. market • swing-trade probability framework • "
-    "entry-quality protection • SMS alerts • $2,000 simulator • "
-    "no live orders"
+    "Full U.S. market • swing-trade scoring • entry-quality protection • "
+    "SMS alerts • $2,000 simulator • no live orders"
 )
 
 tab1, tab2 = st.tabs(
@@ -57,6 +56,132 @@ tab1, tab2 = st.tabs(
         "$2,000 Backtester",
     ]
 )
+
+
+# ============================================================
+# HELPER FUNCTIONS FOR MOBILE DISPLAY
+# ============================================================
+
+def money(value):
+    try:
+        if pd.isna(value):
+            return "N/A"
+        return f"${float(value):,.2f}"
+    except Exception:
+        return "N/A"
+
+
+def score_display(value):
+    try:
+        if pd.isna(value):
+            return "N/A"
+        return f"{float(value):.1f}"
+    except Exception:
+        return "N/A"
+
+
+def rr_display(value):
+    try:
+        if pd.isna(value):
+            return "N/A"
+        return f"{float(value):.2f}:1"
+    except Exception:
+        return "N/A"
+
+
+def action_text(signal):
+    if signal == "A+ SWING BUY":
+        return "BUY — top-tier setup confirmed"
+    if signal == "BUY":
+        return "BUY — entry rules confirmed"
+    if signal == "WATCH":
+        return "WAIT FOR BUY TRIGGER"
+    if signal == "TOO EXTENDED":
+        return "WAIT FOR PULLBACK / RETEST"
+    if signal == "AVOID":
+        return "PASS"
+    return "WAIT"
+
+
+def signal_icon(signal):
+    if signal in ["A+ SWING BUY", "BUY"]:
+        return "🟢"
+    if signal == "WATCH":
+        return "🟡"
+    if signal == "TOO EXTENDED":
+        return "🔴"
+    return "⚪"
+
+
+def render_trade_card(row, rank_num=None):
+    symbol = row["symbol"]
+    signal = row["signal"]
+
+    title_prefix = f"#{rank_num} " if rank_num is not None else ""
+
+    with st.container(border=True):
+        st.markdown(
+            f"### {title_prefix}{signal_icon(signal)} {symbol} — {signal}"
+        )
+
+        st.write(
+            f"**Swing Score:** {score_display(row.get('swing_score'))}/100"
+        )
+
+        st.write(
+            f"**Setup:** {row.get('setup', '')}"
+        )
+
+        st.write(
+            f"**Current Price:** {money(row.get('price'))}"
+        )
+
+        st.write(
+            f"**Entry Quality:** {score_display(row.get('entry_quality'))}/15"
+        )
+
+        st.markdown("#### Entry Plan")
+
+        st.write(
+            f"**Preferred Entry Zone:** "
+            f"{money(row.get('entry_low'))} – {money(row.get('entry_high'))}"
+        )
+
+        st.write(
+            f"**Stop:** {money(row.get('stop'))}"
+        )
+
+        st.write(
+            f"**Target 1:** {money(row.get('target1'))}"
+        )
+
+        st.write(
+            f"**Target 2:** {money(row.get('target2'))}"
+        )
+
+        st.write(
+            f"**Reward / Risk:** {rr_display(row.get('reward_risk'))}"
+        )
+
+        st.markdown("#### Action")
+
+        if signal in ["A+ SWING BUY", "BUY"]:
+            st.success(action_text(signal))
+
+        elif signal == "WATCH":
+            st.warning(action_text(signal))
+
+        elif signal == "TOO EXTENDED":
+            st.error(action_text(signal))
+
+        else:
+            st.info(action_text(signal))
+
+        st.caption(
+            f"Intraday confirmation: "
+            f"{row.get('intraday_signal', 'N/A')} "
+            f"({row.get('intraday_score', 'N/A')}/100)"
+        )
 
 
 # ============================================================
@@ -83,18 +208,15 @@ with st.sidebar:
     )
 
     st.caption(
-        "Phone numbers and Twilio credentials stay in "
-        "Streamlit Secrets."
+        "Phone numbers and Twilio credentials stay in Streamlit Secrets."
     )
 
     if sms_enabled:
 
         if sms_configured():
-
             st.success("SMS configured")
 
         else:
-
             st.warning(
                 "SMS secrets are not configured yet."
             )
@@ -108,8 +230,7 @@ with st.sidebar:
         "",
         help=(
             "Example: NVDA,MU,OWL. "
-            "SELL-risk alerts are evaluated only for "
-            "symbols entered here."
+            "SELL-risk alerts are evaluated only for symbols entered here."
         ),
     )
 
@@ -125,16 +246,14 @@ with tab1:
     )
 
     st.write(
-        "The scanner first removes unsuitable securities and "
-        "illiquid stocks, then analyzes intraday momentum and "
-        "daily swing-trade structure separately."
+        "The scanner first removes unsuitable securities and illiquid stocks, "
+        "then analyzes intraday momentum and daily swing-trade structure separately."
     )
 
     st.info(
         "A strong stock is not automatically a BUY. "
-        "The swing engine can classify a stock as "
-        "TOO EXTENDED when the setup is strong but the "
-        "current entry is poor."
+        "The swing engine can classify a stock as TOO EXTENDED "
+        "when the setup is strong but the current entry is poor."
     )
 
     c1, c2 = st.columns(2)
@@ -156,7 +275,7 @@ with tab1:
     if st.button(
         "RUN FULL-MARKET SWING SCAN",
         type="primary",
-        use_container_width=True,
+        width="stretch",
     ):
 
         os.environ["ALPACA_FEED"] = feed
@@ -184,8 +303,7 @@ with tab1:
             universe = elig.symbol.tolist()
 
             status.write(
-                f"Eligible after type filtering: "
-                f"{len(universe):,}"
+                f"Eligible after type filtering: {len(universe):,}"
             )
 
             now = datetime.now(ET)
@@ -199,19 +317,13 @@ with tab1:
             # =================================================
 
             status.write(
-                "2/5 Applying price, liquidity, trend and "
-                "momentum filters..."
+                "2/5 Applying price, liquidity, trend and momentum filters..."
             )
 
             def prog(done, total):
-
                 progress.progress(
                     min(
-                        int(
-                            done
-                            / max(total, 1)
-                            * 40
-                        ),
+                        int(done / max(total, 1) * 40),
                         40,
                     )
                 )
@@ -228,12 +340,10 @@ with tab1:
             )
 
             if daily.empty:
-
                 status.update(
                     label="No daily market data returned.",
                     state="error",
                 )
-
                 st.stop()
 
             daily["timestamp"] = pd.to_datetime(
@@ -251,17 +361,14 @@ with tab1:
             )
 
             if finalists.empty:
-
                 status.update(
                     label="No qualifying finalists found.",
                     state="complete",
                 )
-
                 st.stop()
 
             status.write(
-                f"Finalists after eligibility filters: "
-                f"{len(finalists)}"
+                f"Finalists after eligibility filters: {len(finalists)}"
             )
 
             progress.progress(45)
@@ -269,24 +376,16 @@ with tab1:
 
             # =================================================
             # STEP 3
-            # GET LONGER DAILY HISTORY FOR SWING ANALYSIS
+            # LONGER DAILY HISTORY
             # =================================================
 
             status.write(
-                "3/5 Pulling longer daily history for "
-                "swing-trade analysis..."
+                "3/5 Pulling longer daily history for swing-trade analysis..."
             )
 
-            finalist_symbols = (
-                finalists
-                .symbol
-                .tolist()
-            )
+            finalist_symbols = finalists.symbol.tolist()
 
-            swing_start = (
-                now
-                - timedelta(days=420)
-            )
+            swing_start = now - timedelta(days=420)
 
             swing_daily = get_bars_batched(
                 finalist_symbols,
@@ -307,14 +406,12 @@ with tab1:
             )
 
             if not swing_daily.empty:
-
                 swing_daily["timestamp"] = pd.to_datetime(
                     swing_daily["timestamp"],
                     utc=True,
                 )
 
             if not spy_daily.empty:
-
                 spy_daily["timestamp"] = pd.to_datetime(
                     spy_daily["timestamp"],
                     utc=True,
@@ -329,8 +426,7 @@ with tab1:
             # =================================================
 
             status.write(
-                "4/5 Pulling intraday bars for finalists "
-                "and SPY..."
+                "4/5 Pulling intraday bars for finalists and SPY..."
             )
 
             market_start = now.replace(
@@ -361,12 +457,10 @@ with tab1:
             progress.progress(75)
 
             if intra.empty:
-
                 status.update(
                     label="No intraday bars returned.",
                     state="error",
                 )
-
                 st.stop()
 
             intra["timestamp"] = pd.to_datetime(
@@ -380,8 +474,7 @@ with tab1:
             )
 
             latest = (
-                intra
-                .timestamp
+                intra.timestamp
                 .dt
                 .tz_convert(ET)
                 .dt
@@ -390,8 +483,7 @@ with tab1:
             )
 
             today = intra[
-                intra
-                .timestamp
+                intra.timestamp
                 .dt
                 .tz_convert(ET)
                 .dt
@@ -400,8 +492,7 @@ with tab1:
             ]
 
             spy_today = spy[
-                spy
-                .timestamp
+                spy.timestamp
                 .dt
                 .tz_convert(ET)
                 .dt
@@ -409,10 +500,10 @@ with tab1:
                 == latest
             ]
 
-            fmap = (
-                finalists
-                .set_index("symbol")
-                .to_dict("index")
+            fmap = finalists.set_index(
+                "symbol"
+            ).to_dict(
+                "index"
             )
 
             advmap = dict(
@@ -429,8 +520,8 @@ with tab1:
             # =================================================
 
             status.write(
-                "5/5 Applying intraday confirmation, "
-                "swing setup, entry quality and risk rules..."
+                "5/5 Applying intraday confirmation, swing setup, "
+                "entry quality and risk rules..."
             )
 
             rows = []
@@ -438,7 +529,6 @@ with tab1:
             for sym, d in today.groupby("symbol"):
 
                 if len(d) < 20:
-
                     continue
 
                 ref = fmap.get(
@@ -480,7 +570,6 @@ with tab1:
                 )
 
                 if p.empty:
-
                     continue
 
                 r = p.iloc[-1]
@@ -501,16 +590,13 @@ with tab1:
                 stock_swing_daily = pd.DataFrame()
 
                 if not swing_daily.empty:
-
                     stock_swing_daily = swing_daily[
-                        swing_daily["symbol"]
-                        == sym
+                        swing_daily["symbol"] == sym
                     ].copy()
 
                 swing = None
 
                 if not stock_swing_daily.empty:
-
                     swing = score_swing_daily(
                         stock_swing_daily,
                         spy_daily,
@@ -522,27 +608,16 @@ with tab1:
                 # ---------------------------------------------
 
                 swing_signal = "N/A"
-
                 swing_score = 0
-
                 setup = ""
-
                 entry_quality = 0
-
                 entry_low = None
-
                 entry_high = None
-
                 stop = None
-
                 target1 = None
-
                 target2 = None
-
                 reward_risk = None
-
                 swing_rsi = None
-
                 swing_rvol = None
 
 
@@ -610,11 +685,8 @@ with tab1:
                 # ---------------------------------------------
 
                 if swing:
-
                     final_signal = swing_signal
-
                 else:
-
                     final_signal = intraday_signal
 
 
@@ -622,13 +694,10 @@ with tab1:
                 # EXPLANATION
                 # ---------------------------------------------
 
-                decision_reason = ""
-
                 if final_signal == "A+ SWING BUY":
 
                     decision_reason = (
-                        "Top-tier swing setup and "
-                        "entry quality confirmed."
+                        "Top-tier swing setup and entry quality confirmed."
                     )
 
                 elif final_signal == "BUY":
@@ -640,8 +709,8 @@ with tab1:
                 elif final_signal == "WATCH":
 
                     decision_reason = (
-                        "Promising setup; wait for a better "
-                        "entry or additional confirmation."
+                        "Promising setup; wait for a better entry or "
+                        "additional confirmation."
                     )
 
                 elif final_signal == "TOO EXTENDED":
@@ -654,8 +723,7 @@ with tab1:
                 elif final_signal == "AVOID":
 
                     decision_reason = (
-                        "Not enough alignment for a "
-                        "high-quality swing entry."
+                        "Not enough alignment for a high-quality swing entry."
                     )
 
                 else:
@@ -687,9 +755,7 @@ with tab1:
                         "entry_quality": entry_quality,
 
                         "price": round(
-                            float(
-                                r.close
-                            ),
+                            float(r.close),
                             2,
                         ),
 
@@ -738,12 +804,8 @@ with tab1:
                         ),
 
                         "intraday_rsi": round(
-                            float(
-                                r.rsi
-                            )
-                            if pd.notna(
-                                r.rsi
-                            )
+                            float(r.rsi)
+                            if pd.notna(r.rsi)
                             else 50,
                             1,
                         ),
@@ -861,18 +923,15 @@ with tab1:
                 ]
 
                 watches = out[
-                    out["signal"]
-                    == "WATCH"
+                    out["signal"] == "WATCH"
                 ]
 
                 extended = out[
-                    out["signal"]
-                    == "TOO EXTENDED"
+                    out["signal"] == "TOO EXTENDED"
                 ]
 
                 avoid = out[
-                    out["signal"]
-                    .isin(
+                    out["signal"].isin(
                         [
                             "AVOID",
                             "NO BUY",
@@ -891,11 +950,6 @@ with tab1:
                 ):
 
                     sent = []
-
-
-                    # ---------------------------------------------
-                    # BUY SMS
-                    # ---------------------------------------------
 
                     if (
                         sms_buy_enabled
@@ -917,8 +971,7 @@ with tab1:
                                 )
 
                                 sent.append(
-                                    f"BUY "
-                                    f"{alert_row['symbol']}"
+                                    f"BUY {alert_row['symbol']}"
                                 )
 
                             except Exception as sms_error:
@@ -929,15 +982,9 @@ with tab1:
                                     f"{sms_error}"
                                 )
 
-
-                    # ---------------------------------------------
-                    # SELL-RISK SMS
-                    # ---------------------------------------------
-
                     held = {
                         x.strip().upper()
-                        for x
-                        in tracked_positions.split(",")
+                        for x in tracked_positions.split(",")
                         if x.strip()
                     }
 
@@ -947,8 +994,9 @@ with tab1:
                     ):
 
                         held_rows = out[
-                            out["symbol"]
-                            .isin(held)
+                            out["symbol"].isin(
+                                held
+                            )
                         ]
 
                         for _, alert_row in held_rows.iterrows():
@@ -975,19 +1023,13 @@ with tab1:
                                 ]
                             )
 
-                            if (
-                                current_price
-                                < current_vwap
-                            ):
+                            if current_price < current_vwap:
 
                                 sell_reasons.append(
                                     "price below VWAP"
                                 )
 
-                            if (
-                                current_intraday_score
-                                < 60
-                            ):
+                            if current_intraday_score < 60:
 
                                 sell_reasons.append(
                                     f"intraday score fell to "
@@ -1043,121 +1085,155 @@ with tab1:
 
 
                 # =================================================
-                # SUMMARY METRICS
+                # SUMMARY
                 # =================================================
 
-                a, b, c, d, e = st.columns(
-                    5
+                st.divider()
+
+                st.subheader(
+                    "Current Market Decision"
                 )
 
-                a.metric(
-                    "Eligible U.S. stocks",
-                    f"{len(universe):,}",
-                )
+                if not buys.empty:
 
-                b.metric(
-                    "Finalists scored",
+                    st.success(
+                        f"🟢 {len(buys)} CONFIRMED SWING BUY "
+                        f"{'SIGNAL' if len(buys) == 1 else 'SIGNALS'}"
+                    )
+
+                    st.write(
+                        ", ".join(
+                            buys["symbol"].head(8)
+                        )
+                    )
+
+                else:
+
+                    st.error(
+                        "🔴 NO CONFIRMED SWING BUY RIGHT NOW"
+                    )
+
+                    st.caption(
+                        "Do not buy simply because a stock has a high "
+                        "Swing Score. Wait until the scanner changes "
+                        "the signal to BUY or A+ SWING BUY."
+                    )
+
+
+                # =================================================
+                # MOBILE SUMMARY METRICS
+                # =================================================
+
+                m1, m2 = st.columns(2)
+
+                m1.metric(
+                    "Finalists",
                     len(out),
                 )
 
-                c.metric(
+                m2.metric(
                     "Confirmed BUYs",
                     len(buys),
                 )
 
-                d.metric(
+                m3, m4 = st.columns(2)
+
+                m3.metric(
                     "WATCH",
                     len(watches),
                 )
 
-                e.metric(
+                m4.metric(
                     "TOO EXTENDED",
                     len(extended),
                 )
 
 
                 # =================================================
-                # BUY MESSAGE
+                # TOP 5 MOBILE OPPORTUNITIES
                 # =================================================
+
+                st.divider()
+
+                st.header(
+                    "Top 5 Swing Opportunities"
+                )
+
+                st.caption(
+                    "These are ranked setups. WATCH means wait — "
+                    "it does not mean buy now."
+                )
+
+                top_opportunities = out.head(
+                    5
+                )
+
+                for rank_num, (_, row) in enumerate(
+                    top_opportunities.iterrows(),
+                    start=1,
+                ):
+
+                    render_trade_card(
+                        row,
+                        rank_num,
+                    )
+
+
+                # =================================================
+                # CONFIRMED BUYS
+                # =================================================
+
+                st.divider()
+
+                st.header(
+                    "🟢 Confirmed BUY Signals"
+                )
 
                 if not buys.empty:
 
-                    st.success(
-                        "CONFIRMED SWING BUY candidates: "
-                        + ", ".join(
-                            buys.symbol.head(8)
+                    for _, row in (
+                        buys
+                        .head(10)
+                        .iterrows()
+                    ):
+
+                        render_trade_card(
+                            row
                         )
-                    )
 
                 else:
 
                     st.info(
-                        "NO CONFIRMED SWING BUY right now."
+                        "No confirmed BUY signals right now."
                     )
 
 
                 # =================================================
-                # BEST OPPORTUNITIES
+                # TOO EXTENDED
                 # =================================================
 
-                st.subheader(
-                    "Best Swing Opportunities Now"
+                st.divider()
+
+                st.header(
+                    "🔴 Strong But Too Extended"
                 )
 
-                display_columns = [
-                    "symbol",
-                    "name",
-                    "signal",
-                    "swing_score",
-                    "setup",
-                    "entry_quality",
-                    "price",
-                    "entry_low",
-                    "entry_high",
-                    "stop",
-                    "target1",
-                    "target2",
-                    "reward_risk",
-                    "intraday_signal",
-                    "intraday_score",
-                    "change_today_%",
-                    "rel_volume",
-                    "vs_SPY_%",
-                    "decision",
-                ]
-
-                available_columns = [
-                    col
-                    for col in display_columns
-                    if col in out.columns
-                ]
-
-                st.dataframe(
-                    out[
-                        available_columns
-                    ].head(50),
-                    use_container_width=True,
-                    hide_index=True,
+                st.caption(
+                    "These may be good stocks but the current entry "
+                    "is too stretched. Wait for a pullback or retest."
                 )
 
+                if not extended.empty:
 
-                # =================================================
-                # BUY SIGNALS
-                # =================================================
+                    for _, row in (
+                        extended
+                        .head(5)
+                        .iterrows()
+                    ):
 
-                st.subheader(
-                    "🟢 Confirmed Swing BUY Signals"
-                )
-
-                if not buys.empty:
-
-                    st.dataframe(
-                        buys[
-                            available_columns
-                        ],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                        render_trade_card(
+                            row
+                        )
 
                 else:
 
@@ -1170,17 +1246,29 @@ with tab1:
                 # WATCH LIST
                 # =================================================
 
-                st.subheader(
-                    "🟡 Swing WATCH List"
+                st.divider()
+
+                st.header(
+                    "🟡 WATCH List"
                 )
+
+                watch_columns = [
+                    "symbol",
+                    "signal",
+                    "swing_score",
+                    "setup",
+                    "price",
+                    "entry_low",
+                    "entry_high",
+                ]
 
                 if not watches.empty:
 
                     st.dataframe(
                         watches[
-                            available_columns
+                            watch_columns
                         ].head(30),
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
@@ -1192,43 +1280,13 @@ with tab1:
 
 
                 # =================================================
-                # TOO EXTENDED
+                # INDIVIDUAL STOCK DETAILS
                 # =================================================
 
-                st.subheader(
-                    "🔴 Strong Stocks — TOO EXTENDED"
-                )
+                st.divider()
 
-                st.caption(
-                    "These stocks may have strong momentum but "
-                    "do not currently have an acceptable swing "
-                    "entry. The scanner is specifically preventing "
-                    "you from chasing them."
-                )
-
-                if not extended.empty:
-
-                    st.dataframe(
-                        extended[
-                            available_columns
-                        ].head(30),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                else:
-
-                    st.write(
-                        "None."
-                    )
-
-
-                # =================================================
-                # CANDIDATE DETAIL VIEW
-                # =================================================
-
-                st.subheader(
-                    "Individual Swing Trade Details"
+                st.header(
+                    "Stock Detail"
                 )
 
                 selected_symbol = st.selectbox(
@@ -1241,102 +1299,76 @@ with tab1:
                     == selected_symbol
                 ].iloc[0]
 
-                m1, m2, m3, m4 = st.columns(
-                    4
-                )
-
-                m1.metric(
-                    "Swing Score",
-                    f"{selected['swing_score']}/100",
-                )
-
-                m2.metric(
-                    "Entry Quality",
-                    f"{selected['entry_quality']}/15",
-                )
-
-                rr_display = (
-                    f"{selected['reward_risk']}:1"
-                    if pd.notna(
-                        selected[
-                            "reward_risk"
-                        ]
-                    )
-                    else "N/A"
-                )
-
-                m3.metric(
-                    "Reward / Risk",
-                    rr_display,
-                )
-
-                m4.metric(
-                    "Signal",
-                    selected[
-                        "signal"
-                    ],
+                render_trade_card(
+                    selected
                 )
 
                 st.write(
-                    f"**Setup:** "
-                    f"{selected['setup']}"
+                    f"**Today's change:** "
+                    f"{selected['change_today_%']:.2f}%"
                 )
 
-                if pd.notna(
-                    selected[
-                        "entry_low"
-                    ]
-                ):
-
-                    st.write(
-                        f"**Preferred Entry Zone:** "
-                        f"${selected['entry_low']:.2f} – "
-                        f"${selected['entry_high']:.2f}"
-                    )
-
-                if pd.notna(
-                    selected[
-                        "stop"
-                    ]
-                ):
-
-                    st.write(
-                        f"**Stop:** "
-                        f"${selected['stop']:.2f}"
-                    )
-
-                if pd.notna(
-                    selected[
-                        "target1"
-                    ]
-                ):
-
-                    st.write(
-                        f"**Target 1:** "
-                        f"${selected['target1']:.2f}"
-                    )
-
-                if pd.notna(
-                    selected[
-                        "target2"
-                    ]
-                ):
-
-                    st.write(
-                        f"**Target 2:** "
-                        f"${selected['target2']:.2f}"
-                    )
+                st.write(
+                    f"**Relative volume:** "
+                    f"{selected['rel_volume']:.2f}x"
+                )
 
                 st.write(
-                    f"**Decision:** "
+                    f"**Relative strength vs SPY:** "
+                    f"{selected['vs_SPY_%']:.2f}%"
+                )
+
+                st.write(
+                    f"**Decision reason:** "
                     f"{selected['decision']}"
                 )
 
-                st.write(
-                    f"**Intraday confirmation:** "
-                    f"{selected['intraday_signal']} "
-                    f"({selected['intraday_score']}/100)"
-                )
+
+                # =================================================
+                # FULL RESEARCH TABLE
+                # =================================================
+
+                st.divider()
+
+                with st.expander(
+                    "Show full research table"
+                ):
+
+                    display_columns = [
+                        "symbol",
+                        "name",
+                        "signal",
+                        "swing_score",
+                        "setup",
+                        "entry_quality",
+                        "price",
+                        "entry_low",
+                        "entry_high",
+                        "stop",
+                        "target1",
+                        "target2",
+                        "reward_risk",
+                        "intraday_signal",
+                        "intraday_score",
+                        "change_today_%",
+                        "rel_volume",
+                        "vs_SPY_%",
+                        "decision",
+                    ]
+
+                    available_columns = [
+                        col
+                        for col in display_columns
+                        if col in out.columns
+                    ]
+
+                    st.dataframe(
+                        out[
+                            available_columns
+                        ].head(50),
+                        width="stretch",
+                        hide_index=True,
+                    )
 
 
                 # =================================================
@@ -1350,19 +1382,16 @@ with tab1:
                     ).encode(
                         "utf-8"
                     ),
-                    file_name=(
-                        "swing_scan_latest.csv"
-                    ),
+                    file_name="swing_scan_latest.csv",
                     mime="text/csv",
+                    width="stretch",
                 )
 
 
         except Exception as e:
 
             status.update(
-                label=(
-                    "Scan stopped because of an error."
-                ),
+                label="Scan stopped because of an error.",
                 state="error",
             )
 
@@ -1371,8 +1400,7 @@ with tab1:
             )
 
             st.info(
-                "If SIP entitlement is mentioned, "
-                "choose IEX."
+                "If SIP entitlement is mentioned, choose IEX."
             )
 
 
@@ -1439,18 +1467,17 @@ with tab2:
     if st.button(
         "RUN $2,000 BACKTEST",
         type="primary",
+        width="stretch",
     ):
 
         syms = [
             x.strip().upper()
-            for x
-            in symbols.split(",")
+            for x in symbols.split(",")
             if x.strip()
         ]
 
         with st.spinner(
-            "Downloading historical data "
-            "and simulating trades..."
+            "Downloading historical data and simulating trades..."
         ):
 
             bars = get_bars_batched(
@@ -1471,10 +1498,7 @@ with tab2:
                 btfeed,
             )
 
-        if (
-            bars.empty
-            or spy.empty
-        ):
+        if bars.empty or spy.empty:
 
             st.error(
                 "No historical data returned."
@@ -1489,9 +1513,7 @@ with tab2:
                 risk_pct=risk_pct,
             )
 
-            stats = res[
-                "stats"
-            ]
+            stats = res["stats"]
 
             cols = st.columns(
                 6
@@ -1540,22 +1562,16 @@ with tab2:
                     ),
                 )
 
-            if not res[
-                "equity"
-            ].empty:
+            if not res["equity"].empty:
 
                 st.plotly_chart(
                     px.line(
-                        res[
-                            "equity"
-                        ],
+                        res["equity"],
                         x="date",
                         y="equity",
-                        title=(
-                            "$2,000 Equity Curve"
-                        ),
+                        title="$2,000 Equity Curve",
                     ),
-                    use_container_width=True,
+                    width="stretch",
                 )
 
             st.subheader(
@@ -1563,10 +1579,8 @@ with tab2:
             )
 
             st.dataframe(
-                res[
-                    "trades"
-                ],
-                use_container_width=True,
+                res["trades"],
+                width="stretch",
                 hide_index=True,
             )
 
@@ -1578,8 +1592,7 @@ with tab2:
 st.divider()
 
 st.warning(
-    "Research only. Scanner signals and simulated results "
-    "do not guarantee future performance. Validate the "
-    "strategy with out-of-sample testing and paper trading "
-    "before risking real capital."
+    "Research only. Scanner signals and simulated results do not "
+    "guarantee future performance. Validate the strategy with "
+    "out-of-sample testing and paper trading before risking real capital."
 )
