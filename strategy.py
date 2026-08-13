@@ -1320,3 +1320,626 @@ def score_swing_daily(
         "too_extended":
             too_extended,
     }
+
+def score_swing_daily(stock_daily, spy_daily=None):
+    """
+    Daily swing-trade scorer.
+    Returns setup, swing score, entry quality, preferred entry,
+    stop, targets and BUY/WATCH/TOO EXTENDED decision.
+    """
+
+    if stock_daily is None or stock_daily.empty:
+        return None
+
+    d = (
+        stock_daily.copy()
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+
+    if len(d) < 60:
+        return None
+
+    close = d["close"].astype(float)
+    volume = d["volume"].astype(float)
+
+    price = safe_float(close.iloc[-1])
+
+    e10 = safe_float(
+        ema(close, 10).iloc[-1],
+        price
+    )
+
+    e20 = safe_float(
+        ema(close, 20).iloc[-1],
+        price
+    )
+
+    s50 = safe_float(
+        sma(close, 50).iloc[-1],
+        e20
+    )
+
+    rsi14 = safe_float(
+        rsi_series(close, 14).iloc[-1],
+        50
+    )
+
+    atr14 = safe_float(
+        atr_series(d, 14).iloc[-1],
+        0
+    )
+
+    avg20vol = safe_float(
+        volume.iloc[:-1].tail(20).mean(),
+        0
+    )
+
+    rvol = (
+        float(volume.iloc[-1]) / avg20vol
+        if avg20vol > 0
+        else 0
+    )
+
+    prior20high = safe_float(
+        d["high"].shift(1).tail(20).max(),
+        price
+    )
+
+    high252 = safe_float(
+        d["high"].tail(min(252, len(d))).max(),
+        price
+    )
+
+    prior_close = safe_float(
+        close.iloc[-2],
+        price
+    )
+
+    day_change = (
+        price / prior_close - 1
+        if prior_close
+        else 0
+    )
+
+    # ========================================================
+    # SETUP TYPE
+    # ========================================================
+
+    if (
+        price >= prior20high
+        and rvol >= 1.4
+        and day_change < 0.12
+    ):
+        setup = "BREAKOUT"
+
+    elif day_change >= 0.12:
+        setup = "GAP MOMENTUM"
+
+    elif (
+        price > e20 > s50
+        and abs(price - e20)
+        <= max(0.8 * atr14, 0.03 * price)
+    ):
+        setup = "20EMA PULLBACK"
+
+    elif (
+        price > e10 > e20 > s50
+        and price <= e10 + 0.7 * atr14
+    ):
+        setup = "10EMA CONTINUATION"
+
+    elif (
+        price > e20 > s50
+        and price >= 0.97 * prior20high
+    ):
+        setup = "BASE / NEAR BREAKOUT"
+
+    else:
+        setup = "TREND MOMENTUM"
+
+    # ========================================================
+    # TREND + RELATIVE STRENGTH — 20 POINTS
+    # ========================================================
+
+    trend_score = 0
+
+    if price > e20 > s50:
+        trend_score += 12
+    elif price > s50:
+        trend_score += 6
+
+    stock20 = 0
+
+    if len(close) >= 21:
+        old = safe_float(close.iloc[-21], price)
+        if old:
+            stock20 = price / old - 1
+
+    spy20 = 0
+
+    if (
+        spy_daily is not None
+        and not spy_daily.empty
+        and len(spy_daily) >= 21
+    ):
+        spy = (
+            spy_daily.copy()
+            .sort_values("timestamp")
+        )
+
+        spy_close = spy["close"].astype(float)
+
+        old_spy = safe_float(
+            spy_close.iloc[-21],
+            spy_close.iloc[-1]
+        )
+
+        if old_spy:
+            spy20 = (
+                float(spy_close.iloc[-1])
+                / old_spy
+                - 1
+            )
+
+    if stock20 > spy20:
+        trend_score += 8
+
+    trend_score = min(20, trend_score)
+
+    # ========================================================
+    # ACCUMULATION / VOLUME — 15 POINTS
+    # ========================================================
+
+    accumulation_score = 0
+
+    if rvol >= 1.5:
+        accumulation_score += 7
+    elif rvol >= 1.2:
+        accumulation_score += 5
+
+    recent = d.tail(20)
+
+    up_days = recent["close"] > recent["open"]
+
+    up_volume = (
+        safe_float(
+            recent.loc[
+                up_days,
+                "volume"
+            ].mean(),
+            0
+        )
+        if up_days.any()
+        else 0
+    )
+
+    down_volume = (
+        safe_float(
+            recent.loc[
+                ~up_days,
+                "volume"
+            ].mean(),
+            0
+        )
+        if (~up_days).any()
+        else 0
+    )
+
+    if up_volume > down_volume * 1.15:
+        accumulation_score += 8
+    elif up_volume > down_volume:
+        accumulation_score += 5
+
+    accumulation_score = min(
+        15,
+        accumulation_score
+    )
+
+    # ========================================================
+    # ENTRY QUALITY — 15 POINTS
+    # ========================================================
+
+    entry_quality = 0
+
+    dist20 = (
+        price / e20 - 1
+        if e20
+        else 0
+    )
+
+    if 0 <= dist20 <= 0.04:
+        entry_quality += 6
+    elif 0.04 < dist20 <= 0.07:
+        entry_quality += 4
+    elif -0.02 <= dist20 < 0:
+        entry_quality += 3
+
+    if 52 <= rsi14 <= 68:
+        entry_quality += 4
+    elif 45 <= rsi14 < 52:
+        entry_quality += 2
+    elif 68 < rsi14 <= 72:
+        entry_quality += 2
+
+    if setup in [
+        "20EMA PULLBACK",
+        "10EMA CONTINUATION"
+    ]:
+        entry_quality += 3
+
+    elif setup == "BREAKOUT":
+        if day_change <= 0.08:
+            entry_quality += 3
+
+    elif setup == "BASE / NEAR BREAKOUT":
+        entry_quality += 2
+
+    if abs(day_change) <= 0.06:
+        entry_quality += 2
+    elif abs(day_change) <= 0.10:
+        entry_quality += 1
+
+    entry_quality = min(
+        15,
+        entry_quality
+    )
+
+    # ========================================================
+    # MARKET REGIME — 10 POINTS
+    # ========================================================
+
+    market_score = 5
+
+    if (
+        spy_daily is not None
+        and not spy_daily.empty
+        and len(spy_daily) >= 50
+    ):
+        spy = (
+            spy_daily.copy()
+            .sort_values("timestamp")
+        )
+
+        spy_close = spy["close"].astype(float)
+
+        spy_e20 = safe_float(
+            ema(spy_close, 20).iloc[-1],
+            spy_close.iloc[-1]
+        )
+
+        spy_s50 = safe_float(
+            sma(spy_close, 50).iloc[-1],
+            spy_e20
+        )
+
+        market_score = 0
+
+        if spy_close.iloc[-1] > spy_e20:
+            market_score += 4
+
+        if spy_close.iloc[-1] > spy_s50:
+            market_score += 3
+
+        if spy_e20 > spy_s50:
+            market_score += 3
+
+    # ========================================================
+    # SETUP QUALITY — 10 POINTS
+    # ========================================================
+
+    setup_scores = {
+        "20EMA PULLBACK": 10,
+        "BREAKOUT": 9,
+        "10EMA CONTINUATION": 9,
+        "BASE / NEAR BREAKOUT": 8,
+        "GAP MOMENTUM": 4,
+        "TREND MOMENTUM": 5,
+    }
+
+    setup_score = setup_scores.get(
+        setup,
+        5
+    )
+
+    # ========================================================
+    # ENTRY ZONE
+    # ========================================================
+
+    if setup == "20EMA PULLBACK":
+
+        entry_low = max(
+            e20 - 0.25 * atr14,
+            0.01
+        )
+
+        entry_high = (
+            e20 + 0.50 * atr14
+        )
+
+    elif setup == "10EMA CONTINUATION":
+
+        entry_low = max(
+            e10 - 0.30 * atr14,
+            0.01
+        )
+
+        entry_high = (
+            e10 + 0.45 * atr14
+        )
+
+    elif setup in [
+        "BREAKOUT",
+        "BASE / NEAR BREAKOUT"
+    ]:
+
+        entry_low = max(
+            prior20high - 0.20 * atr14,
+            0.01
+        )
+
+        entry_high = (
+            prior20high + 0.50 * atr14
+        )
+
+    else:
+
+        entry_low = max(
+            e20,
+            price - 0.50 * atr14
+        )
+
+        entry_high = (
+            price + 0.25 * atr14
+        )
+
+    # ========================================================
+    # STOP / TARGETS
+    # ========================================================
+
+    structural_stop = (
+        e20 - 0.50 * atr14
+    )
+
+    atr_stop = (
+        price - 2.0 * atr14
+    )
+
+    stop = max(
+        min(structural_stop, s50),
+        atr_stop
+    )
+
+    if stop >= price:
+
+        stop = (
+            price
+            - max(
+                atr14,
+                price * 0.025
+            )
+        )
+
+    stop = max(
+        stop,
+        0.01
+    )
+
+    risk = max(
+        price - stop,
+        0.01
+    )
+
+    target1 = (
+        price + 2.0 * risk
+    )
+
+    target2 = (
+        price + 3.0 * risk
+    )
+
+    realistic_target = target1
+
+    if (
+        high252 > price
+        and high252 < target1
+    ):
+        realistic_target = high252
+
+    reward_risk = (
+        max(
+            realistic_target - price,
+            0
+        )
+        / risk
+    )
+
+    # ========================================================
+    # REWARD / RISK SCORE — 10 POINTS
+    # ========================================================
+
+    if reward_risk >= 3:
+        rr_score = 10
+
+    elif reward_risk >= 2.5:
+        rr_score = 9
+
+    elif reward_risk >= 2:
+        rr_score = 8
+
+    elif reward_risk >= 1.7:
+        rr_score = 5
+
+    elif reward_risk >= 1.4:
+        rr_score = 3
+
+    else:
+        rr_score = 0
+
+    # ========================================================
+    # LIQUIDITY / VOLATILITY — 5 POINTS
+    # ========================================================
+
+    atr_pct = (
+        atr14 / price
+        if price
+        else 0
+    )
+
+    adv = safe_float(
+        (
+            d["close"]
+            * d["volume"]
+        )
+        .tail(20)
+        .mean(),
+        0
+    )
+
+    vol_liq_score = 0
+
+    if 0.015 <= atr_pct <= 0.055:
+        vol_liq_score += 3
+    elif 0.01 <= atr_pct <= 0.075:
+        vol_liq_score += 2
+
+    if adv >= 100_000_000:
+        vol_liq_score += 2
+    elif adv >= 20_000_000:
+        vol_liq_score += 1
+
+    # ========================================================
+    # SECTOR / CATALYST PLACEHOLDERS
+    # ========================================================
+
+    # Neutral until real sector + earnings feeds are connected.
+    sector_score = 5
+    catalyst_score = 2.5
+
+    # ========================================================
+    # TOTAL SWING SCORE
+    # ========================================================
+
+    swing_score = (
+        trend_score
+        + accumulation_score
+        + entry_quality
+        + market_score
+        + sector_score
+        + setup_score
+        + rr_score
+        + catalyst_score
+        + vol_liq_score
+    )
+
+    swing_score = round(
+        max(
+            0,
+            min(
+                100,
+                swing_score
+            )
+        ),
+        1
+    )
+
+    # ========================================================
+    # HARD ANTI-CHASE FILTER
+    # ========================================================
+
+    too_extended = (
+        price > e20 * 1.10
+        or rsi14 > 76
+        or day_change > 0.12
+    )
+
+    inside_entry_zone = (
+        entry_low
+        <= price
+        <= entry_high
+    )
+
+    # ========================================================
+    # FINAL SIGNAL
+    # ========================================================
+
+    if too_extended:
+
+        signal = "TOO EXTENDED"
+
+    elif (
+        swing_score >= 90
+        and entry_quality >= 12
+        and reward_risk >= 2
+        and market_score >= 7
+        and inside_entry_zone
+    ):
+
+        signal = "A+ SWING BUY"
+
+    elif (
+        swing_score >= 85
+        and entry_quality >= 10
+        and reward_risk >= 2
+        and market_score >= 5
+        and inside_entry_zone
+    ):
+
+        signal = "BUY"
+
+    elif swing_score >= 75:
+
+        signal = "WATCH"
+
+    else:
+
+        signal = "AVOID"
+
+    return {
+        "signal": signal,
+        "swing_score": swing_score,
+        "setup": setup,
+        "price": round(price, 2),
+        "entry_quality": round(
+            entry_quality,
+            1
+        ),
+        "entry_low": round(
+            entry_low,
+            2
+        ),
+        "entry_high": round(
+            entry_high,
+            2
+        ),
+        "stop": round(
+            stop,
+            2
+        ),
+        "target1": round(
+            target1,
+            2
+        ),
+        "target2": round(
+            target2,
+            2
+        ),
+        "reward_risk": round(
+            reward_risk,
+            2
+        ),
+        "rsi14": round(
+            rsi14,
+            1
+        ),
+        "rvol": round(
+            rvol,
+            2
+        ),
+        "too_extended": bool(
+            too_extended
+        ),
+        "inside_entry_zone": bool(
+            inside_entry_zone
+        ),
+    }
