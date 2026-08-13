@@ -7,6 +7,18 @@ import pandas as pd
 # ============================================================
 
 
+# Conservative hard gates. These are deliberately separate from the
+# 0-100 score so a high score cannot override an abnormal risk event.
+NEGATIVE_GAP_THRESHOLD = -0.05
+NEGATIVE_CLOSE_SHOCK_THRESHOLD = -0.07
+EVENT_LOOKBACK_SESSIONS = 5
+EVENT_MIN_COOLDOWN_SESSIONS = 3
+MAX_DISTRIBUTION_DAYS_BUY = 4
+MIN_RS_PERCENTILE_BUY = 0.70
+MIN_RS_PERCENTILE_A_PLUS = 0.85
+MIN_INTRADAY_CONFIRMATION_SCORE = 85
+
+
 def safe_float(x, default=0.0):
     try:
         if pd.isna(x):
@@ -47,6 +59,149 @@ def atr_series(df, n=14):
     return tr.ewm(alpha=1 / n, adjust=False).mean()
 
 
+def downside_event_risk(df, e20=None):
+    """Detect a recent abnormal downside gap/selloff and its repair status.
+
+    The rule intentionally does not depend on an earnings-calendar vendor.
+    Earnings misses, guidance cuts and other material negative catalysts all
+    receive the same protection. A recent event remains blocked for at least
+    three completed sessions and until price closes above the event-day high
+    and the 20-day EMA.
+    """
+
+    default = {
+        "risk_flag": False,
+        "risk_reason": "No abnormal downside catalyst gap detected",
+        "gap_down_pct": 0.0,
+        "event_day_change_pct": 0.0,
+        "event_days_ago": None,
+        "event_repaired": True,
+    }
+
+    if df is None or len(df) < 2:
+        return default
+
+    d = df.copy().sort_values("timestamp").reset_index(drop=True)
+    open_px = pd.to_numeric(d["open"], errors="coerce")
+    high_px = pd.to_numeric(d["high"], errors="coerce")
+    close_px = pd.to_numeric(d["close"], errors="coerce")
+    prior_close = close_px.shift(1)
+
+    open_gap = open_px / prior_close - 1
+    close_change = close_px / prior_close - 1
+
+    start = max(1, len(d) - EVENT_LOOKBACK_SESSIONS)
+    event_mask = (
+        (open_gap <= NEGATIVE_GAP_THRESHOLD)
+        | (close_change <= NEGATIVE_CLOSE_SHOCK_THRESHOLD)
+    )
+    event_positions = np.flatnonzero(event_mask.iloc[start:].fillna(False).to_numpy())
+
+    if len(event_positions) == 0:
+        return default
+
+    event_pos = start + int(event_positions[-1])
+    days_ago = len(d) - 1 - event_pos
+    gap_pct = safe_float(open_gap.iloc[event_pos])
+    event_change = safe_float(close_change.iloc[event_pos])
+    event_high = safe_float(high_px.iloc[event_pos])
+    current_close = safe_float(close_px.iloc[-1])
+
+    if e20 is None:
+        e20 = safe_float(ema(close_px, 20).iloc[-1], current_close)
+
+    repaired = (
+        days_ago >= EVENT_MIN_COOLDOWN_SESSIONS
+        and current_close > event_high
+        and current_close > safe_float(e20, current_close)
+    )
+
+    hard_block = not repaired
+    worst_move = min(gap_pct, event_change)
+    reason = (
+        f"Abnormal downside catalyst move {worst_move * 100:.1f}% "
+        f"{days_ago} session{'s' if days_ago != 1 else ''} ago; "
+        "wait for at least 3 sessions and a close above the event-day high "
+        "and 20-day EMA"
+    )
+
+    if repaired:
+        reason = "Prior downside event has completed its cooldown and repair test"
+
+    return {
+        "risk_flag": bool(hard_block),
+        "risk_reason": reason,
+        "gap_down_pct": round(gap_pct * 100, 2),
+        "event_day_change_pct": round(event_change * 100, 2),
+        "event_days_ago": int(days_ago),
+        "event_repaired": bool(repaired),
+    }
+
+
+def distribution_day_count(df, lookback=20):
+    """Count high-volume down days, a simple institutional-selling proxy."""
+
+    if df is None or len(df) < 2:
+        return 0
+
+    d = df.copy().sort_values("timestamp").tail(lookback)
+    close_px = pd.to_numeric(d["close"], errors="coerce")
+    volume = pd.to_numeric(d["volume"], errors="coerce")
+    down = close_px.pct_change() < 0
+    higher_volume = volume > volume.shift(1)
+    return int((down & higher_volume).fillna(False).sum())
+
+
+def relative_strength_percentiles(daily_bars):
+    """Return cross-sectional 20/60-day leadership percentiles by symbol."""
+
+    if daily_bars is None or daily_bars.empty:
+        return {}
+
+    rows = []
+    for symbol, group in daily_bars.groupby("symbol"):
+        g = group.sort_values("timestamp")
+        close_px = pd.to_numeric(g["close"], errors="coerce").dropna()
+        if len(close_px) < 61:
+            continue
+
+        r20 = safe_float(close_px.iloc[-1] / close_px.iloc[-21] - 1)
+        r60 = safe_float(close_px.iloc[-1] / close_px.iloc[-61] - 1)
+        rows.append({"symbol": symbol, "leadership": 0.40 * r20 + 0.60 * r60})
+
+    if not rows:
+        return {}
+
+    ranked = pd.DataFrame(rows)
+    ranked["rs_percentile"] = ranked["leadership"].rank(pct=True, method="average")
+    return dict(zip(ranked["symbol"], ranked["rs_percentile"]))
+
+
+def combine_daily_intraday_signal(
+    daily_signal,
+    intraday_signal,
+    intraday_score,
+    risk_flag=False,
+):
+    """Require live confirmation before promoting a daily setup to BUY."""
+
+    if risk_flag:
+        return "AVOID", "A hard risk-event gate is active."
+
+    if daily_signal in {"A+ SWING BUY", "BUY"}:
+        confirmed = (
+            intraday_signal == "BUY"
+            and safe_float(intraday_score) >= MIN_INTRADAY_CONFIRMATION_SCORE
+        )
+        if not confirmed:
+            return (
+                "WATCH",
+                "Daily setup passed, but live intraday confirmation has not passed yet.",
+            )
+
+    return daily_signal, "Daily and intraday signal rules are aligned."
+
+
 # ============================================================
 # DAILY PREFILTER
 # ============================================================
@@ -68,6 +223,10 @@ def prefilter_daily(
             "top_n",
             kwargs.get("finalists_n", limit)
         )
+    )
+
+    min_avg_volume = safe_float(
+        kwargs.get("min_avg_volume", 0)
     )
 
     d = bars.copy()
@@ -104,6 +263,9 @@ def prefilter_daily(
             prior["volume"].tail(20).mean()
         )
 
+        if avg_vol < min_avg_volume:
+            continue
+
         avg_dollar_volume = price * avg_vol
 
         if avg_dollar_volume < min_avg_dollar_volume:
@@ -116,6 +278,17 @@ def prefilter_daily(
 
         daily_change_pct = (
             (price / prior_close - 1) * 100
+            if prior_close
+            else 0
+        )
+
+        latest_open = safe_float(
+            latest.get("open"),
+            price,
+        )
+
+        open_gap_pct = (
+            (latest_open / prior_close - 1) * 100
             if prior_close
             else 0
         )
@@ -205,6 +378,17 @@ def prefilter_daily(
         elif daily_change_pct > 10:
             score -= 10
 
+        # A severe downside catalyst should not rank like a healthy pullback.
+        # Keep the row eligible for an explicit AVOID explanation, but push it
+        # well below clean momentum candidates in the expensive second stage.
+        risk_event_candidate = (
+            open_gap_pct <= NEGATIVE_GAP_THRESHOLD * 100
+            or daily_change_pct <= NEGATIVE_CLOSE_SHOCK_THRESHOLD * 100
+        )
+
+        if risk_event_candidate:
+            score -= 40
+
         m = meta[sym]
 
         rows.append(
@@ -219,6 +403,10 @@ def prefilter_daily(
                 "price": round(price, 2),
                 "daily_change_pct":
                     round(daily_change_pct, 2),
+                "open_gap_pct":
+                    round(open_gap_pct, 2),
+                "risk_event_candidate":
+                    bool(risk_event_candidate),
                 "daily_volume_ratio":
                     round(daily_volume_ratio, 2),
                 "avg_dollar_volume":
@@ -819,10 +1007,10 @@ def classify(
 
 
 # ============================================================
-# DAILY SWING TRADE SCORER
+# LEGACY DAILY SWING TRADE SCORER (kept for reference; not exported)
 # ============================================================
 
-def score_swing_daily(
+def _score_swing_daily_legacy(
     stock_daily,
     spy_daily=None
 ):
@@ -1321,11 +1509,19 @@ def score_swing_daily(
             too_extended,
     }
 
-def score_swing_daily(stock_daily, spy_daily=None):
+def score_swing_daily(
+    stock_daily,
+    spy_daily=None,
+    qqq_daily=None,
+    rs_percentile=None,
+):
     """
     Daily swing-trade scorer.
     Returns setup, swing score, entry quality, preferred entry,
-    stop, targets and BUY/WATCH/TOO EXTENDED decision.
+    stop, targets and BUY/WATCH/TOO EXTENDED/AVOID decision.
+
+    BUY signals must pass independent risk-event, trend-health,
+    distribution and cross-sectional leadership gates.
     """
 
     if stock_daily is None or stock_daily.empty:
@@ -1350,13 +1546,16 @@ def score_swing_daily(stock_daily, spy_daily=None):
         price
     )
 
+    e20_series = ema(close, 20)
+    s50_series = sma(close, 50)
+
     e20 = safe_float(
-        ema(close, 20).iloc[-1],
+        e20_series.iloc[-1],
         price
     )
 
     s50 = safe_float(
-        sma(close, 50).iloc[-1],
+        s50_series.iloc[-1],
         e20
     )
 
@@ -1402,11 +1601,56 @@ def score_swing_daily(stock_daily, spy_daily=None):
         else 0
     )
 
+    latest_open = safe_float(
+        d["open"].iloc[-1],
+        price,
+    )
+
+    open_gap = (
+        latest_open / prior_close - 1
+        if prior_close
+        else 0
+    )
+
+    risk_event = downside_event_risk(
+        d,
+        e20=e20,
+    )
+
+    distribution_days = distribution_day_count(
+        d,
+        lookback=20,
+    )
+
+    e20_rising = (
+        len(e20_series) >= 6
+        and e20 > safe_float(e20_series.iloc[-6], e20)
+    )
+
+    s50_rising = (
+        len(s50_series) >= 11
+        and s50 > safe_float(s50_series.iloc[-11], s50)
+    )
+
+    trend_health = bool(
+        e20_rising
+        and s50_rising
+    )
+
+    rs_percentile_value = (
+        None
+        if rs_percentile is None or pd.isna(rs_percentile)
+        else max(0.0, min(1.0, safe_float(rs_percentile)))
+    )
+
     # ========================================================
     # SETUP TYPE
     # ========================================================
 
-    if (
+    if risk_event["risk_flag"]:
+        setup = "NEGATIVE CATALYST GAP"
+
+    elif (
         price >= prior20high
         and rvol >= 1.4
         and day_change < 0.12
@@ -1445,18 +1689,31 @@ def score_swing_daily(stock_daily, spy_daily=None):
     trend_score = 0
 
     if price > e20 > s50:
-        trend_score += 12
+        trend_score += 8
     elif price > s50:
-        trend_score += 6
+        trend_score += 4
+
+    if e20_rising:
+        trend_score += 2
+
+    if s50_rising:
+        trend_score += 2
 
     stock20 = 0
+    stock60 = 0
 
     if len(close) >= 21:
         old = safe_float(close.iloc[-21], price)
         if old:
             stock20 = price / old - 1
 
+    if len(close) >= 61:
+        old60 = safe_float(close.iloc[-61], price)
+        if old60:
+            stock60 = price / old60 - 1
+
     spy20 = 0
+    spy60 = 0
 
     if (
         spy_daily is not None
@@ -1482,8 +1739,19 @@ def score_swing_daily(stock_daily, spy_daily=None):
                 - 1
             )
 
+        if len(spy_close) >= 61:
+            old_spy60 = safe_float(
+                spy_close.iloc[-61],
+                spy_close.iloc[-1],
+            )
+            if old_spy60:
+                spy60 = float(spy_close.iloc[-1]) / old_spy60 - 1
+
     if stock20 > spy20:
-        trend_score += 8
+        trend_score += 4
+
+    if stock60 > spy60:
+        trend_score += 4
 
     trend_score = min(20, trend_score)
 
@@ -1531,9 +1799,17 @@ def score_swing_daily(stock_daily, spy_daily=None):
     elif up_volume > down_volume:
         accumulation_score += 5
 
-    accumulation_score = min(
-        15,
-        accumulation_score
+    if distribution_days >= 6:
+        accumulation_score -= 5
+    elif distribution_days == 5:
+        accumulation_score -= 3
+
+    accumulation_score = max(
+        0,
+        min(
+            15,
+            accumulation_score
+        )
     )
 
     # ========================================================
@@ -1616,13 +1892,35 @@ def score_swing_daily(stock_daily, spy_daily=None):
         market_score = 0
 
         if spy_close.iloc[-1] > spy_e20:
-            market_score += 4
+            market_score += 3
 
         if spy_close.iloc[-1] > spy_s50:
-            market_score += 3
+            market_score += 2
 
         if spy_e20 > spy_s50:
-            market_score += 3
+            market_score += 2
+
+        if (
+            qqq_daily is not None
+            and not qqq_daily.empty
+            and len(qqq_daily) >= 50
+        ):
+            qqq = qqq_daily.copy().sort_values("timestamp")
+            qqq_close = qqq["close"].astype(float)
+            qqq_e20 = safe_float(
+                ema(qqq_close, 20).iloc[-1],
+                qqq_close.iloc[-1],
+            )
+            qqq_s50 = safe_float(
+                sma(qqq_close, 50).iloc[-1],
+                qqq_e20,
+            )
+
+            if qqq_close.iloc[-1] > qqq_e20:
+                market_score += 2
+
+            if qqq_e20 > qqq_s50:
+                market_score += 1
 
     # ========================================================
     # SETUP QUALITY — 10 POINTS
@@ -1634,6 +1932,7 @@ def score_swing_daily(stock_daily, spy_daily=None):
         "10EMA CONTINUATION": 9,
         "BASE / NEAR BREAKOUT": 8,
         "GAP MOMENTUM": 4,
+        "NEGATIVE CATALYST GAP": 0,
         "TREND MOMENTUM": 5,
     }
 
@@ -1809,12 +2108,27 @@ def score_swing_daily(stock_daily, spy_daily=None):
         vol_liq_score += 1
 
     # ========================================================
-    # SECTOR / CATALYST PLACEHOLDERS
+    # CROSS-SECTIONAL LEADERSHIP / CATALYST RISK
     # ========================================================
 
-    # Neutral until real sector + earnings feeds are connected.
-    sector_score = 5
-    catalyst_score = 2.5
+    if rs_percentile_value is None:
+        leadership_score = 5
+    elif rs_percentile_value >= 0.90:
+        leadership_score = 10
+    elif rs_percentile_value >= 0.80:
+        leadership_score = 8
+    elif rs_percentile_value >= 0.70:
+        leadership_score = 6
+    elif rs_percentile_value >= 0.50:
+        leadership_score = 4
+    else:
+        leadership_score = 1
+
+    catalyst_score = (
+        0
+        if risk_event["risk_flag"]
+        else 2.5
+    )
 
     # ========================================================
     # TOTAL SWING SCORE
@@ -1825,12 +2139,15 @@ def score_swing_daily(stock_daily, spy_daily=None):
         + accumulation_score
         + entry_quality
         + market_score
-        + sector_score
+        + leadership_score
         + setup_score
         + rr_score
         + catalyst_score
         + vol_liq_score
     )
+
+    if risk_event["risk_flag"]:
+        swing_score -= 25
 
     swing_score = round(
         max(
@@ -1847,10 +2164,15 @@ def score_swing_daily(stock_daily, spy_daily=None):
     # HARD ANTI-CHASE FILTER
     # ========================================================
 
+    positive_gap_extension = (
+        open_gap >= 0.08
+        or day_change >= 0.10
+    )
+
     too_extended = (
         price > e20 * 1.10
         or rsi14 > 76
-        or day_change > 0.12
+        or positive_gap_extension
     )
 
     inside_entry_zone = (
@@ -1863,7 +2185,25 @@ def score_swing_daily(stock_daily, spy_daily=None):
     # FINAL SIGNAL
     # ========================================================
 
-    if too_extended:
+    leadership_buy_gate = (
+        rs_percentile_value is None
+        or rs_percentile_value >= MIN_RS_PERCENTILE_BUY
+    )
+
+    leadership_a_plus_gate = (
+        rs_percentile_value is None
+        or rs_percentile_value >= MIN_RS_PERCENTILE_A_PLUS
+    )
+
+    distribution_gate = (
+        distribution_days <= MAX_DISTRIBUTION_DAYS_BUY
+    )
+
+    if risk_event["risk_flag"]:
+
+        signal = "AVOID"
+
+    elif too_extended:
 
         signal = "TOO EXTENDED"
 
@@ -1873,6 +2213,9 @@ def score_swing_daily(stock_daily, spy_daily=None):
         and reward_risk >= 2
         and market_score >= 7
         and inside_entry_zone
+        and trend_health
+        and distribution_gate
+        and leadership_a_plus_gate
     ):
 
         signal = "A+ SWING BUY"
@@ -1883,6 +2226,9 @@ def score_swing_daily(stock_daily, spy_daily=None):
         and reward_risk >= 2
         and market_score >= 5
         and inside_entry_zone
+        and trend_health
+        and distribution_gate
+        and leadership_buy_gate
     ):
 
         signal = "BUY"
@@ -1941,5 +2287,64 @@ def score_swing_daily(stock_daily, spy_daily=None):
         ),
         "inside_entry_zone": bool(
             inside_entry_zone
+        ),
+        "risk_flag": bool(
+            risk_event["risk_flag"]
+        ),
+        "risk_reason": risk_event[
+            "risk_reason"
+        ],
+        "gap_down_pct": risk_event[
+            "gap_down_pct"
+        ],
+        "event_day_change_pct": risk_event[
+            "event_day_change_pct"
+        ],
+        "event_days_ago": risk_event[
+            "event_days_ago"
+        ],
+        "event_repaired": bool(
+            risk_event["event_repaired"]
+        ),
+        "open_gap_pct": round(
+            open_gap * 100,
+            2
+        ),
+        "day_change_pct": round(
+            day_change * 100,
+            2
+        ),
+        "trend_health": bool(
+            trend_health
+        ),
+        "e20_rising": bool(
+            e20_rising
+        ),
+        "s50_rising": bool(
+            s50_rising
+        ),
+        "distribution_days": int(
+            distribution_days
+        ),
+        "market_score": round(
+            market_score,
+            1
+        ),
+        "leadership_percentile": (
+            None
+            if rs_percentile_value is None
+            else round(rs_percentile_value * 100, 1)
+        ),
+        "leadership_score": round(
+            leadership_score,
+            1
+        ),
+        "trend_score": round(
+            trend_score,
+            1
+        ),
+        "accumulation_score": round(
+            accumulation_score,
+            1
         ),
     }

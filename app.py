@@ -18,6 +18,8 @@ from strategy import (
     prepare_intraday,
     classify,
     score_swing_daily,
+    relative_strength_percentiles,
+    combine_daily_intraday_signal,
 )
 
 from backtest import backtest
@@ -39,21 +41,21 @@ load_dotenv()
 ET = ZoneInfo("America/New_York")
 
 st.set_page_config(
-    page_title="Institutional Swing Scanner v3",
+    page_title="Institutional Swing Scanner v3.1",
     layout="wide",
 )
 
-st.title("Institutional Swing Scanner v3")
+st.title("Institutional Swing Scanner v3.1")
 
 st.caption(
-    "Full U.S. market • swing-trade scoring • entry-quality protection • "
+    "Full U.S. market • catalyst-gap protection • daily + intraday confirmation • "
     "SMS alerts • $2,000 simulator • no live orders"
 )
 
 tab1, tab2 = st.tabs(
     [
         "Live Swing Scanner",
-        "$2,000 Backtester",
+        "$2,000 Intraday Simulator",
     ]
 )
 
@@ -115,6 +117,14 @@ def signal_icon(signal):
 
 def why_not_buy(row):
     signal = row.get("signal", "")
+
+    if bool(row.get("risk_flag", False)):
+        return str(
+            row.get(
+                "risk_reason",
+                "A hard downside catalyst-risk gate is active.",
+            )
+        )
 
     if signal in ["A+ SWING BUY", "BUY"]:
         return "All required BUY gates passed."
@@ -180,6 +190,33 @@ def why_not_buy(row):
             "Current price is outside the preferred entry zone"
         )
 
+    if not bool(row.get("trend_health", True)):
+        failures.append(
+            "The 20-day and 50-day trend slopes are not both rising"
+        )
+
+    try:
+        distribution_days = int(row.get("distribution_days", 0))
+    except Exception:
+        distribution_days = 0
+
+    if distribution_days > 4:
+        failures.append(
+            f"{distribution_days} recent distribution days show excessive selling pressure"
+        )
+
+    leadership = row.get("leadership_percentile")
+    if leadership is not None and not pd.isna(leadership):
+        if float(leadership) < 70:
+            failures.append(
+                f"Market leadership rank {float(leadership):.0f}% is below the 70% BUY gate"
+            )
+
+    if not bool(row.get("intraday_confirmed", True)):
+        failures.append(
+            "Live intraday BUY confirmation has not passed"
+        )
+
     if not failures and signal == "WATCH":
         failures.append(
             "Visible price, score and risk gates pass, but the broader "
@@ -222,6 +259,23 @@ def render_trade_card(row, rank_num=None):
         st.write(
             f"**Entry Quality:** {score_display(row.get('entry_quality'))}/15"
         )
+
+        if bool(row.get("risk_flag", False)):
+            st.error(
+                "**Risk Event:** "
+                + str(row.get("risk_reason", "Hard risk gate active"))
+            )
+        else:
+            leadership = row.get("leadership_percentile")
+            leadership_text = (
+                "N/A"
+                if leadership is None or pd.isna(leadership)
+                else f"{float(leadership):.0f}th percentile"
+            )
+            st.caption(
+                f"Risk gate: PASS • Market leadership: {leadership_text} • "
+                f"Distribution days: {int(row.get('distribution_days', 0))}"
+            )
 
         st.markdown("#### Entry Plan")
 
@@ -362,8 +416,9 @@ with tab1:
 
     st.info(
         "A strong stock is not automatically a BUY. "
-        "The swing engine can classify a stock as TOO EXTENDED "
-        "when the setup is strong but the current entry is poor."
+        "The swing engine blocks abnormal downside catalyst gaps, requires "
+        "rising trends and market leadership, and will not issue a BUY until "
+        "the live intraday confirmation also passes."
     )
 
     c1, c2 = st.columns(2)
@@ -487,8 +542,8 @@ with tab1:
                 pause_seconds=0.10,
             )
 
-            spy_daily = get_bars(
-                ["SPY"],
+            market_daily = get_bars(
+                ["SPY", "QQQ"],
                 swing_start,
                 now,
                 "1Day",
@@ -501,11 +556,31 @@ with tab1:
                     utc=True,
                 )
 
-            if not spy_daily.empty:
-                spy_daily["timestamp"] = pd.to_datetime(
-                    spy_daily["timestamp"],
+            if not market_daily.empty:
+                market_daily["timestamp"] = pd.to_datetime(
+                    market_daily["timestamp"],
                     utc=True,
                 )
+
+            spy_daily = (
+                market_daily[
+                    market_daily["symbol"] == "SPY"
+                ].copy()
+                if not market_daily.empty
+                else pd.DataFrame()
+            )
+
+            qqq_daily = (
+                market_daily[
+                    market_daily["symbol"] == "QQQ"
+                ].copy()
+                if not market_daily.empty
+                else pd.DataFrame()
+            )
+
+            leadership_map = relative_strength_percentiles(
+                swing_daily
+            )
 
             progress.progress(60)
 
@@ -668,6 +743,8 @@ with tab1:
                     swing = score_swing_daily(
                         stock_swing_daily,
                         spy_daily,
+                        qqq_daily,
+                        leadership_map.get(sym),
                     )
 
                 swing_signal = "N/A"
@@ -682,6 +759,14 @@ with tab1:
                 reward_risk = None
                 swing_rsi = None
                 swing_rvol = None
+                risk_flag = False
+                risk_reason = ""
+                gap_down_pct = 0
+                event_days_ago = None
+                trend_health = False
+                distribution_days = 0
+                leadership_percentile = None
+                market_score = None
 
                 if swing:
 
@@ -737,21 +822,99 @@ with tab1:
                         "rvol"
                     )
 
-                if swing:
-                    final_signal = swing_signal
-                else:
-                    final_signal = intraday_signal
+                    risk_flag = bool(
+                        swing.get(
+                            "risk_flag",
+                            False,
+                        )
+                    )
 
-                if final_signal == "A+ SWING BUY":
+                    risk_reason = swing.get(
+                        "risk_reason",
+                        "",
+                    )
+
+                    gap_down_pct = swing.get(
+                        "gap_down_pct",
+                        0,
+                    )
+
+                    event_days_ago = swing.get(
+                        "event_days_ago"
+                    )
+
+                    trend_health = bool(
+                        swing.get(
+                            "trend_health",
+                            False,
+                        )
+                    )
+
+                    distribution_days = swing.get(
+                        "distribution_days",
+                        0,
+                    )
+
+                    leadership_percentile = swing.get(
+                        "leadership_percentile"
+                    )
+
+                    market_score = swing.get(
+                        "market_score"
+                    )
+
+                if swing:
+                    final_signal, confluence_reason = (
+                        combine_daily_intraday_signal(
+                            swing_signal,
+                            intraday_signal,
+                            intraday_score,
+                            risk_flag=risk_flag,
+                        )
+                    )
+                else:
+                    final_signal = (
+                        "WATCH"
+                        if intraday_signal == "BUY"
+                        else intraday_signal
+                    )
+                    confluence_reason = (
+                        "Daily swing history is unavailable, so an intraday BUY "
+                        "cannot be promoted to a final BUY."
+                    )
+
+                intraday_confirmed = bool(
+                    intraday_signal == "BUY"
+                    and intraday_score >= 85
+                )
+
+                if risk_flag:
+
+                    decision_reason = risk_reason
+
+                elif (
+                    final_signal == "WATCH"
+                    and (
+                        not swing
+                        or swing_signal in [
+                            "A+ SWING BUY",
+                            "BUY",
+                        ]
+                    )
+                ):
+
+                    decision_reason = confluence_reason
+
+                elif final_signal == "A+ SWING BUY":
 
                     decision_reason = (
-                        "Top-tier swing setup and entry quality confirmed."
+                        "Top-tier daily setup and live intraday entry confirmation passed."
                     )
 
                 elif final_signal == "BUY":
 
                     decision_reason = (
-                        "Swing setup and entry rules confirmed."
+                        "Daily swing setup and live intraday entry confirmation passed."
                     )
 
                 elif final_signal == "WATCH":
@@ -835,6 +998,15 @@ with tab1:
                         ),
                         "swing_rsi": swing_rsi,
                         "swing_rvol": swing_rvol,
+                        "risk_flag": risk_flag,
+                        "risk_reason": risk_reason,
+                        "gap_down_pct": gap_down_pct,
+                        "event_days_ago": event_days_ago,
+                        "trend_health": trend_health,
+                        "distribution_days": distribution_days,
+                        "leadership_percentile": leadership_percentile,
+                        "market_score": market_score,
+                        "intraday_confirmed": intraday_confirmed,
                         "vs_SPY_%": round(
                             float(
                                 r.get(
@@ -1308,6 +1480,15 @@ with tab1:
                         "target1",
                         "target2",
                         "reward_risk",
+                        "risk_flag",
+                        "risk_reason",
+                        "gap_down_pct",
+                        "event_days_ago",
+                        "trend_health",
+                        "distribution_days",
+                        "leadership_percentile",
+                        "market_score",
+                        "intraday_confirmed",
                         "intraday_signal",
                         "intraday_score",
                         "change_today_%",
@@ -1365,7 +1546,13 @@ with tab1:
 with tab2:
 
     st.subheader(
-        "$2,000 Historical Performance Simulator"
+        "$2,000 Intraday Confirmation Simulator"
+    )
+
+    st.warning(
+        "This simulator tests the intraday confirmation engine only. It does "
+        "not yet reproduce the full v3.1 daily-plus-intraday scanner and is "
+        "not proof that the live strategy will be profitable."
     )
 
     c1, c2, c3 = st.columns(
