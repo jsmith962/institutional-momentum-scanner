@@ -16,6 +16,10 @@ EVENT_MIN_COOLDOWN_SESSIONS = 3
 MAX_DISTRIBUTION_DAYS_BUY = 4
 MIN_RS_PERCENTILE_BUY = 0.70
 MIN_RS_PERCENTILE_A_PLUS = 0.85
+MIN_SWING_SCORE_BUY = 85
+MIN_ENTRY_QUALITY_BUY = 10
+MIN_REWARD_RISK_BUY = 2.0
+MIN_MARKET_SCORE_BUY = 5.0
 MIN_INTRADAY_CONFIRMATION_SCORE = 85
 
 
@@ -199,7 +203,30 @@ def combine_daily_intraday_signal(
                 "Daily setup passed, but live intraday confirmation has not passed yet.",
             )
 
-    return daily_signal, "Daily and intraday signal rules are aligned."
+        return (
+            daily_signal,
+            "Daily BUY gates and live intraday confirmation passed.",
+        )
+
+    if daily_signal == "TOO EXTENDED":
+        return (
+            "TOO EXTENDED",
+            "The daily setup is too extended; wait for a pullback or retest.",
+        )
+
+    if daily_signal == "WATCH":
+        return (
+            "WATCH",
+            "The daily setup is WATCH-only and has not passed every BUY gate.",
+        )
+
+    if daily_signal == "AVOID":
+        return (
+            "AVOID",
+            "The daily setup did not pass every BUY gate.",
+        )
+
+    return daily_signal, f"The daily signal remained {daily_signal}."
 
 
 # ============================================================
@@ -2221,10 +2248,10 @@ def score_swing_daily(
         signal = "A+ SWING BUY"
 
     elif (
-        swing_score >= 85
-        and entry_quality >= 10
-        and reward_risk >= 2
-        and market_score >= 5
+        swing_score >= MIN_SWING_SCORE_BUY
+        and entry_quality >= MIN_ENTRY_QUALITY_BUY
+        and reward_risk >= MIN_REWARD_RISK_BUY
+        and market_score >= MIN_MARKET_SCORE_BUY
         and inside_entry_zone
         and trend_health
         and distribution_gate
