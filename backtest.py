@@ -16,6 +16,13 @@ import numpy as np
 import pandas as pd
 
 from strategy import (
+    MAX_DISTRIBUTION_DAYS_BUY,
+    MIN_ENTRY_QUALITY_BUY,
+    MIN_INTRADAY_CONFIRMATION_SCORE,
+    MIN_MARKET_SCORE_BUY,
+    MIN_REWARD_RISK_BUY,
+    MIN_RS_PERCENTILE_BUY,
+    MIN_SWING_SCORE_BUY,
     classify,
     combine_daily_intraday_signal,
     prepare_intraday,
@@ -26,6 +33,32 @@ from strategy import (
 
 ET = ZoneInfo("America/New_York")
 BUY_SIGNALS = {"BUY", "A+ SWING BUY"}
+DAILY_BUY_GATE_LABELS = {
+    "risk_event_clear": "No active catalyst-gap risk",
+    "not_too_extended": "Not too extended",
+    "swing_score": f"Swing Score at least {MIN_SWING_SCORE_BUY}",
+    "entry_quality": f"Entry Quality at least {MIN_ENTRY_QUALITY_BUY}/15",
+    "reward_risk": f"Reward/risk at least {MIN_REWARD_RISK_BUY:.1f}:1",
+    "market_regime": f"Market Score at least {MIN_MARKET_SCORE_BUY:.0f}/10",
+    "inside_entry_zone": "Price inside preferred entry zone",
+    "trend_health": "20EMA and 50SMA trends rising",
+    "distribution": (
+        f"Distribution days no more than {MAX_DISTRIBUTION_DAYS_BUY}"
+    ),
+    "leadership": (
+        f"Market leadership at least {MIN_RS_PERCENTILE_BUY * 100:.0f}th percentile"
+    ),
+}
+INTRADAY_BUY_GATE_LABELS = {
+    "intraday_signal": "Intraday signal is BUY",
+    "intraday_score": (
+        f"Intraday Score at least {MIN_INTRADAY_CONFIRMATION_SCORE}"
+    ),
+}
+BUY_GATE_LABELS = {
+    **DAILY_BUY_GATE_LABELS,
+    **INTRADAY_BUY_GATE_LABELS,
+}
 TRADE_COLUMNS = [
     "symbol", "signal_date", "signal_time", "entry_time", "exit_time",
     "signal", "setup", "swing_score", "intraday_score", "entry",
@@ -77,7 +110,216 @@ def _empty_result(starting_capital: float, warnings=None):
             "max_drawdown_pct": 0.0,
         },
         "signal_log": pd.DataFrame(),
+        "diagnostics": {
+            "funnel": pd.DataFrame(),
+            "gate_failures": pd.DataFrame(),
+            "near_misses": pd.DataFrame(),
+        },
         "warnings": list(warnings or []),
+    }
+
+
+def _number(value, default=0.0):
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _candidate_gate_diagnostics(swing, intraday_signal, intraday_score):
+    """Return additive BUY-gate diagnostics without changing a signal."""
+
+    leadership = swing.get("leadership_percentile")
+    leadership_pass = (
+        leadership is None
+        or pd.isna(leadership)
+        or _number(leadership) >= MIN_RS_PERCENTILE_BUY * 100
+    )
+    daily_gates = {
+        "risk_event_clear": not bool(swing.get("risk_flag", False)),
+        "not_too_extended": not bool(swing.get("too_extended", False)),
+        "swing_score": (
+            _number(swing.get("swing_score")) >= MIN_SWING_SCORE_BUY
+        ),
+        "entry_quality": (
+            _number(swing.get("entry_quality")) >= MIN_ENTRY_QUALITY_BUY
+        ),
+        "reward_risk": (
+            _number(swing.get("reward_risk")) >= MIN_REWARD_RISK_BUY
+        ),
+        "market_regime": (
+            _number(swing.get("market_score")) >= MIN_MARKET_SCORE_BUY
+        ),
+        "inside_entry_zone": bool(swing.get("inside_entry_zone", False)),
+        "trend_health": bool(swing.get("trend_health", False)),
+        "distribution": (
+            _number(swing.get("distribution_days"), float("inf"))
+            <= MAX_DISTRIBUTION_DAYS_BUY
+        ),
+        "leadership": bool(leadership_pass),
+    }
+    intraday_gates = {
+        "intraday_signal": intraday_signal == "BUY",
+        "intraday_score": (
+            _number(intraday_score) >= MIN_INTRADAY_CONFIRMATION_SCORE
+        ),
+    }
+    all_gates = {**daily_gates, **intraday_gates}
+    daily_failed = [
+        DAILY_BUY_GATE_LABELS[key]
+        for key, passed in daily_gates.items()
+        if not passed
+    ]
+    intraday_failed = [
+        INTRADAY_BUY_GATE_LABELS[key]
+        for key, passed in intraday_gates.items()
+        if not passed
+    ]
+    failed = daily_failed + intraday_failed
+
+    diagnostics = {
+        "daily_gates_passed": sum(daily_gates.values()),
+        "daily_gate_count": len(daily_gates),
+        "buy_gates_passed": sum(all_gates.values()),
+        "buy_gate_count": len(all_gates),
+        "failed_gate_count": len(failed),
+        "daily_failed_gates": "; ".join(daily_failed) or "None",
+        "intraday_failed_gates": "; ".join(intraday_failed) or "None",
+        "failed_buy_gates": "; ".join(failed) or "None",
+    }
+    diagnostics.update(
+        {f"gate_{key}": bool(passed) for key, passed in all_gates.items()}
+    )
+    return diagnostics
+
+
+def _build_signal_diagnostics(signal_log, trade_count=0):
+    """Build a funnel, failure counts and one best near miss per symbol."""
+
+    if signal_log is None or signal_log.empty:
+        return {
+            "funnel": pd.DataFrame(),
+            "gate_failures": pd.DataFrame(),
+            "near_misses": pd.DataFrame(),
+        }
+
+    frame = signal_log.copy()
+    total = len(frame)
+    final_buy = frame["signal"].isin(BUY_SIGNALS)
+    for key in BUY_GATE_LABELS:
+        column = f"gate_{key}"
+        if column not in frame:
+            # A legacy or externally supplied confirmed row necessarily
+            # represents a pass; other legacy rows remain conservative.
+            frame[column] = final_buy
+    gate_columns = [f"gate_{key}" for key in BUY_GATE_LABELS]
+    if "buy_gates_passed" not in frame:
+        frame["buy_gates_passed"] = frame[gate_columns].astype(bool).sum(axis=1)
+    if "buy_gate_count" not in frame:
+        frame["buy_gate_count"] = len(gate_columns)
+    if "failed_gate_count" not in frame:
+        frame["failed_gate_count"] = (
+            len(gate_columns) - frame["buy_gates_passed"].astype(int)
+        )
+    if "failed_buy_gates" not in frame:
+        frame["failed_buy_gates"] = frame.apply(
+            lambda row: "; ".join(
+                label
+                for key, label in BUY_GATE_LABELS.items()
+                if not bool(row[f"gate_{key}"])
+            )
+            or "None",
+            axis=1,
+        )
+    daily_buy = frame["daily_signal"].isin(BUY_SIGNALS)
+    intraday_buy = frame["intraday_signal"].eq("BUY")
+    intraday_score_pass = frame["gate_intraday_score"].astype(bool)
+
+    stages = [
+        ("Candidates evaluated", total),
+        (
+            f"Daily Swing Score at least {MIN_SWING_SCORE_BUY}",
+            int(frame["gate_swing_score"].astype(bool).sum()),
+        ),
+        ("All daily BUY gates passed", int(daily_buy.sum())),
+        (
+            "Daily BUY plus intraday BUY signal",
+            int((daily_buy & intraday_buy).sum()),
+        ),
+        (
+            "Fully confirmed BUY",
+            int((daily_buy & intraday_buy & intraday_score_pass & final_buy).sum()),
+        ),
+        ("Completed simulated trades", int(trade_count)),
+    ]
+    funnel = pd.DataFrame(
+        [
+            {
+                "stage": stage,
+                "count": count,
+                "percent_of_candidates": round(count / total * 100, 1),
+            }
+            for stage, count in stages
+        ]
+    )
+
+    failure_rows = []
+    for key, label in BUY_GATE_LABELS.items():
+        column = f"gate_{key}"
+        failures = int((~frame[column].astype(bool)).sum())
+        failure_rows.append(
+            {
+                "gate": label,
+                "stage": "Intraday" if key in INTRADAY_BUY_GATE_LABELS else "Daily",
+                "failed": failures,
+                "failure_percent": round(failures / total * 100, 1),
+            }
+        )
+    gate_failures = (
+        pd.DataFrame(failure_rows)
+        .sort_values(["failed", "stage", "gate"], ascending=[False, True, True])
+        .reset_index(drop=True)
+    )
+
+    near_misses = frame[~final_buy].copy()
+    if not near_misses.empty:
+        near_misses["gates_passed"] = (
+            near_misses["buy_gates_passed"].astype(int).astype(str)
+            + "/"
+            + near_misses["buy_gate_count"].astype(int).astype(str)
+        )
+        near_misses = (
+            near_misses.sort_values(
+                [
+                    "failed_gate_count",
+                    "swing_score",
+                    "intraday_score",
+                    "session",
+                ],
+                ascending=[True, False, False, False],
+            )
+            .drop_duplicates("symbol")
+            .head(10)
+        )
+        near_misses = near_misses[
+            [
+                "symbol",
+                "session",
+                "signal",
+                "swing_score",
+                "intraday_score",
+                "entry_quality",
+                "gates_passed",
+                "failed_buy_gates",
+            ]
+        ].reset_index(drop=True)
+
+    return {
+        "funnel": funnel,
+        "gate_failures": gate_failures,
+        "near_misses": near_misses,
     }
 
 
@@ -490,24 +732,45 @@ def _signal_candidates(
             intraday_score,
             risk_flag=bool(swing.get("risk_flag", False)),
         )
-        rows.append(
-            {
-                "symbol": symbol,
-                "session": session_date,
-                "signal_time": pd.Timestamp(intraday_row["timestamp"]),
-                "signal": final_signal,
-                "daily_signal": swing["signal"],
-                "intraday_signal": intraday_signal,
-                "swing_score": float(swing["swing_score"]),
-                "intraday_score": float(intraday_score),
-                "entry_quality": float(swing["entry_quality"]),
-                "setup": swing["setup"],
-                "reference_price": float(intraday_row["close"]),
-                "planned_stop": float(swing["stop"]),
-                "decision": decision,
-                "intraday_reasons": "; ".join(intraday_reasons),
-            }
+        row = {
+            "symbol": symbol,
+            "session": session_date,
+            "signal_time": pd.Timestamp(intraday_row["timestamp"]),
+            "signal": final_signal,
+            "daily_signal": swing["signal"],
+            "intraday_signal": intraday_signal,
+            "swing_score": float(swing["swing_score"]),
+            "intraday_score": float(intraday_score),
+            "entry_quality": float(swing["entry_quality"]),
+            "setup": swing["setup"],
+            "reference_price": float(intraday_row["close"]),
+            "entry_low": _number(swing.get("entry_low")),
+            "entry_high": _number(swing.get("entry_high")),
+            "planned_stop": float(swing["stop"]),
+            "reward_risk": _number(swing.get("reward_risk")),
+            "market_score": _number(swing.get("market_score")),
+            "leadership_percentile": swing.get("leadership_percentile"),
+            "distribution_days": int(
+                _number(swing.get("distribution_days"))
+            ),
+            "trend_health": bool(swing.get("trend_health", False)),
+            "inside_entry_zone": bool(
+                swing.get("inside_entry_zone", False)
+            ),
+            "too_extended": bool(swing.get("too_extended", False)),
+            "risk_flag": bool(swing.get("risk_flag", False)),
+            "risk_reason": swing.get("risk_reason", ""),
+            "decision": decision,
+            "intraday_reasons": "; ".join(intraday_reasons),
+        }
+        row.update(
+            _candidate_gate_diagnostics(
+                swing,
+                intraday_signal,
+                intraday_score,
+            )
         )
+        rows.append(row)
 
     return sorted(
         rows,
@@ -819,11 +1082,16 @@ def swing_backtest(
             "Fewer than 30 completed trades: the sample is too small for a reliable conclusion."
         )
 
+    signal_frame = pd.DataFrame(signal_log)
     return {
         "trades": trades_frame,
         "equity": equity_frame,
         "stats": stats,
-        "signal_log": pd.DataFrame(signal_log),
+        "signal_log": signal_frame,
+        "diagnostics": _build_signal_diagnostics(
+            signal_frame,
+            trade_count=trade_count,
+        ),
         "warnings": warnings,
     }
 

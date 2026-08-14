@@ -1,4 +1,4 @@
-# Institutional Swing Scanner v3.2
+# Institutional Swing Scanner v3.2.1
 
 A Streamlit research scanner for liquid U.S. stocks. It combines daily swing
 structure with live intraday confirmation and does not place orders.
@@ -47,6 +47,20 @@ The v3.2 backtest evaluates only the comparison symbols entered by the user.
 It does not yet reconstruct the full point-in-time U.S. stock universe and can
 still contain selection or survivorship bias. A small trade sample is not
 evidence of profitability.
+
+## v3.2.1 signal diagnostics
+
+- Adds a BUY-confirmation funnel from all evaluated candidates through the
+  daily score, complete daily BUY gates, intraday confirmation and completed
+  simulated trades.
+- Counts the most common failed BUY gates and reports their failure rates.
+- Ranks the closest non-BUY observation for each symbol by the fewest failed
+  gates, while clearly labeling near misses as non-recommendations.
+- Adds every daily and intraday gate result, plus readable failed-gate reasons,
+  to the historical signal audit.
+- Replaces the ambiguous “daily and intraday rules are aligned” audit text with
+  the actual daily outcome or confirmation status.
+- Preserves every v3.2 BUY threshold and all portfolio simulation behavior.
 
 ## Required Streamlit secrets
 

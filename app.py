@@ -41,11 +41,11 @@ load_dotenv()
 ET = ZoneInfo("America/New_York")
 
 st.set_page_config(
-    page_title="Institutional Swing Scanner v3.2",
+    page_title="Institutional Swing Scanner v3.2.1",
     layout="wide",
 )
 
-st.title("Institutional Swing Scanner v3.2")
+st.title("Institutional Swing Scanner v3.2.1")
 
 st.caption(
     "Full U.S. market • catalyst-gap protection • daily + intraday confirmation • "
@@ -1970,6 +1970,125 @@ with tab2:
                     "period before changing the strategy rules."
                 )
 
+            diagnostics = res.get(
+                "diagnostics",
+                {},
+            )
+
+            funnel = diagnostics.get(
+                "funnel",
+                pd.DataFrame(),
+            )
+
+            gate_failures = diagnostics.get(
+                "gate_failures",
+                pd.DataFrame(),
+            )
+
+            near_misses = diagnostics.get(
+                "near_misses",
+                pd.DataFrame(),
+            )
+
+            st.subheader(
+                "BUY confirmation funnel"
+            )
+
+            st.caption(
+                "This shows where historical candidates stopped progressing. "
+                "It does not loosen any BUY rule or predict a future win rate."
+            )
+
+            if funnel.empty:
+
+                st.info(
+                    "No candidates were available for gate diagnostics."
+                )
+
+            else:
+
+                st.dataframe(
+                    funnel,
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            if not gate_failures.empty:
+
+                primary = gate_failures.iloc[0]
+
+                st.info(
+                    f"Most frequently failed gate: {primary['gate']} failed for "
+                    f"{int(primary['failed'])} candidates "
+                    f"({float(primary['failure_percent']):.1f}%)."
+                )
+
+                st.markdown(
+                    "#### Most common failed BUY gates"
+                )
+
+                st.dataframe(
+                    gate_failures.head(8),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            st.markdown(
+                "#### Closest near misses"
+            )
+
+            st.caption(
+                "One best non-BUY observation per symbol, ranked by the "
+                "fewest failed gates. A near miss is not a recommendation."
+            )
+
+            if near_misses.empty:
+
+                st.info(
+                    "No non-BUY candidates were available to rank."
+                )
+
+            else:
+
+                for _, near_miss in near_misses.head(5).iterrows():
+
+                    with st.container(
+                        border=True
+                    ):
+
+                        st.markdown(
+                            f"**{near_miss['symbol']} — "
+                            f"{near_miss['signal']}**"
+                        )
+
+                        st.write(
+                            f"Session: {near_miss['session']} • "
+                            f"Gates passed: {near_miss['gates_passed']}"
+                        )
+
+                        st.write(
+                            f"Swing Score: {float(near_miss['swing_score']):.1f} • "
+                            f"Intraday Score: "
+                            f"{float(near_miss['intraday_score']):.1f} • "
+                            f"Entry Quality: "
+                            f"{float(near_miss['entry_quality']):.1f}/15"
+                        )
+
+                        st.warning(
+                            "Failed BUY gates: "
+                            f"{near_miss['failed_buy_gates']}"
+                        )
+
+                with st.expander(
+                    "Show full near-miss table"
+                ):
+
+                    st.dataframe(
+                        near_misses,
+                        width="stretch",
+                        hide_index=True,
+                    )
+
             if not res["equity"].empty:
 
                 st.plotly_chart(
@@ -2001,7 +2120,7 @@ with tab2:
                     ).encode(
                         "utf-8"
                     ),
-                    file_name="v3_2_swing_backtest_trades.csv",
+                    file_name="v3_2_1_swing_backtest_trades.csv",
                     mime="text/csv",
                     width="stretch",
                 )
@@ -2031,7 +2150,7 @@ with tab2:
                         ).encode(
                             "utf-8"
                         ),
-                        file_name="v3_2_signal_audit.csv",
+                        file_name="v3_2_1_signal_audit.csv",
                         mime="text/csv",
                         width="stretch",
                     )
