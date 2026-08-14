@@ -30,7 +30,7 @@ from alerts import (
     build_buy_message,
     build_sell_message,
 )
-
+from validation import validate_candidate, validation_summary
 
 # ============================================================
 # APP CONFIGURATION
