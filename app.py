@@ -22,7 +22,7 @@ from strategy import (
     combine_daily_intraday_signal,
 )
 
-from backtest import backtest
+from backtest import swing_backtest
 
 from alerts import (
     sms_configured,
@@ -41,21 +41,21 @@ load_dotenv()
 ET = ZoneInfo("America/New_York")
 
 st.set_page_config(
-    page_title="Institutional Swing Scanner v3.1",
+    page_title="Institutional Swing Scanner v3.2",
     layout="wide",
 )
 
-st.title("Institutional Swing Scanner v3.1")
+st.title("Institutional Swing Scanner v3.2")
 
 st.caption(
     "Full U.S. market • catalyst-gap protection • daily + intraday confirmation • "
-    "SMS alerts • $2,000 simulator • no live orders"
+    "SMS alerts • production-equivalent swing backtester • no live orders"
 )
 
 tab1, tab2 = st.tabs(
     [
         "Live Swing Scanner",
-        "$2,000 Intraday Simulator",
+        "$2,000 Swing Backtester",
     ]
 )
 
@@ -1546,13 +1546,21 @@ with tab1:
 with tab2:
 
     st.subheader(
-        "$2,000 Intraday Confirmation Simulator"
+        "$2,000 Production-Equivalent Swing Backtester"
+    )
+
+    st.info(
+        "This version runs the same daily score, market-regime rules, "
+        "leadership gate, catalyst protection and intraday confirmation used "
+        "by the live scanner. A signal is evaluated at the selected time and "
+        "filled no earlier than the following minute."
     )
 
     st.warning(
-        "This simulator tests the intraday confirmation engine only. It does "
-        "not yet reproduce the full v3.1 daily-plus-intraday scanner and is "
-        "not proof that the live strategy will be profitable."
+        "Important limitation: results cover only the symbols entered below. "
+        "They do not yet reconstruct the entire historical U.S. market or "
+        "remove survivorship bias. Treat the results as research, not proof "
+        "of future profitability."
     )
 
     c1, c2, c3 = st.columns(
@@ -1561,19 +1569,20 @@ with tab2:
 
     start_date = c1.date_input(
         "Start",
-        datetime(
-            2025,
-            1,
-            1,
+        datetime.now(ET).date()
+        - timedelta(
+            days=180,
         ),
+        key="swing_bt_start",
     )
 
     end_date = c2.date_input(
         "End",
-        datetime.now().date()
+        datetime.now(ET).date()
         - timedelta(
             days=1
         ),
+        key="swing_bt_end",
     )
 
     risk_pct = (
@@ -1581,10 +1590,66 @@ with tab2:
             "Risk per trade",
             0.25,
             2.0,
-            1.0,
+            0.50,
             0.25,
+            key="swing_bt_risk",
         )
         / 100
+    )
+
+    c4, c5, c6 = st.columns(
+        3
+    )
+
+    max_positions = c4.slider(
+        "Maximum open positions",
+        1,
+        5,
+        3,
+        1,
+        key="swing_bt_positions",
+    )
+
+    max_holding_days = c5.slider(
+        "Maximum holding sessions",
+        5,
+        30,
+        20,
+        5,
+        key="swing_bt_hold",
+    )
+
+    scan_time = c6.selectbox(
+        "Historical scan time (ET)",
+        [
+            "11:30",
+            "14:00",
+            "15:30",
+        ],
+        index=0,
+        key="swing_bt_time",
+    )
+
+    c7, c8 = st.columns(
+        2
+    )
+
+    slippage_bps = c7.slider(
+        "Estimated slippage (basis points per order)",
+        0,
+        25,
+        5,
+        1,
+        key="swing_bt_slippage",
+    )
+
+    commission_bps = c8.slider(
+        "Estimated fees (basis points per order)",
+        0,
+        10,
+        0,
+        1,
+        key="swing_bt_fees",
     )
 
     symbols = st.text_input(
@@ -1592,6 +1657,11 @@ with tab2:
         (
             "NVDA,MU,AMD,MRVL,FSLR,RIOT,"
             "MSFT,AMZN,META,PLTR,AVGO,ANET"
+        ),
+        key="swing_bt_symbols",
+        help=(
+            "Use at least 10 liquid stocks. Relative-strength percentiles "
+            "are calculated inside this comparison group."
         ),
     )
 
@@ -1602,7 +1672,12 @@ with tab2:
             "sip",
         ],
         index=0,
-        key="bt",
+        key="swing_bt_feed",
+    )
+
+    st.caption(
+        "IEX is suitable for testing but contains only one exchange. "
+        "Use SIP when your Alpaca plan permits it."
     )
 
     if st.button(
@@ -1617,47 +1692,188 @@ with tab2:
             if x.strip()
         ]
 
+        if start_date >= end_date:
+            st.error(
+                "Choose a start date before the end date."
+            )
+            st.stop()
+
+        if (end_date - start_date).days > 365:
+            st.warning(
+                "A range longer than one year can be slow or exceed the "
+                "minute-data limit. Start with 6–12 months, then test "
+                "additional non-overlapping periods."
+            )
+
+        if len(syms) < 5:
+            st.error(
+                "Enter at least 5 symbols so the relative-strength ranking "
+                "has a meaningful comparison group."
+            )
+            st.stop()
+
+        if len(syms) < 10:
+            st.warning(
+                "Fewer than 10 symbols can make leadership percentiles "
+                "unstable. Ten or more is recommended."
+            )
+
+        request_end = end_date + timedelta(
+            days=1,
+        )
+
+        warmup_start = start_date - timedelta(
+            days=450,
+        )
+
         with st.spinner(
-            "Downloading historical data and simulating trades..."
+            "Downloading daily and minute history, rebuilding each signal "
+            "and simulating the portfolio..."
         ):
 
             bars = get_bars_batched(
                 syms,
                 start_date,
-                end_date,
+                request_end,
                 "1Min",
                 btfeed,
-                batch_size=30,
+                batch_size=20,
                 pause_seconds=0.1,
             )
 
-            spy = get_bars(
-                ["SPY"],
+            market_minutes = get_bars(
+                [
+                    "SPY",
+                    "QQQ",
+                ],
                 start_date,
-                end_date,
+                request_end,
                 "1Min",
                 btfeed,
             )
 
-        if bars.empty or spy.empty:
+            daily_history = get_bars_batched(
+                syms,
+                warmup_start,
+                request_end,
+                "1Day",
+                btfeed,
+                batch_size=100,
+                pause_seconds=0.1,
+            )
+
+            market_daily = get_bars(
+                [
+                    "SPY",
+                    "QQQ",
+                ],
+                warmup_start,
+                request_end,
+                "1Day",
+                btfeed,
+            )
+
+            if market_minutes.empty:
+
+                spy = pd.DataFrame()
+                qqq = pd.DataFrame()
+
+            else:
+
+                spy = market_minutes[
+                    market_minutes["symbol"] == "SPY"
+                ].copy()
+
+                qqq = market_minutes[
+                    market_minutes["symbol"] == "QQQ"
+                ].copy()
+
+        if (
+            bars.empty
+            or spy.empty
+            or qqq.empty
+            or daily_history.empty
+            or market_daily.empty
+            or not {
+                "SPY",
+                "QQQ",
+            }.issubset(
+                set(
+                    market_daily["symbol"]
+                )
+            )
+        ):
 
             st.error(
-                "No historical data returned."
+                "The complete daily and minute history was not returned. "
+                "Try a shorter date range or choose IEX if SIP entitlement "
+                "was rejected."
             )
 
         else:
 
-            res = backtest(
+            complete_symbols = sorted(
+                set(
+                    bars["symbol"]
+                )
+                & set(
+                    daily_history["symbol"]
+                )
+            )
+
+            missing_symbols = sorted(
+                set(syms)
+                - set(complete_symbols)
+            )
+
+            if missing_symbols:
+
+                st.warning(
+                    "Excluded symbols with incomplete daily or minute data: "
+                    + ", ".join(
+                        missing_symbols
+                    )
+                )
+
+            if len(complete_symbols) < 5:
+
+                st.error(
+                    "Fewer than 5 symbols returned complete data. "
+                    "Choose a shorter date range or a different feed."
+                )
+                st.stop()
+
+            bars = bars[
+                bars["symbol"].isin(
+                    complete_symbols
+                )
+            ].copy()
+
+            daily_history = daily_history[
+                daily_history["symbol"].isin(
+                    complete_symbols
+                )
+            ].copy()
+
+            res = swing_backtest(
                 bars,
                 spy,
+                qqq_bars=qqq,
+                daily_bars=daily_history,
+                market_daily_bars=market_daily,
                 starting_capital=2000,
                 risk_pct=risk_pct,
+                max_positions=max_positions,
+                max_holding_days=max_holding_days,
+                scan_time=scan_time,
+                slippage_bps=slippage_bps,
+                commission_bps=commission_bps,
             )
 
             stats = res["stats"]
 
             cols = st.columns(
-                6
+                4
             )
 
             labels = [
@@ -1677,14 +1893,6 @@ with tab2:
                     "profit_factor",
                     "Profit factor",
                 ),
-                (
-                    "max_drawdown_pct",
-                    "Max DD %",
-                ),
-                (
-                    "trades",
-                    "Trades",
-                ),
             ]
 
             for col, (
@@ -1701,6 +1909,65 @@ with tab2:
                         key,
                         "—",
                     ),
+                )
+
+            cols2 = st.columns(
+                4
+            )
+
+            labels2 = [
+                (
+                    "max_drawdown_pct",
+                    "Max DD %",
+                ),
+                (
+                    "trades",
+                    "Trades",
+                ),
+                (
+                    "expectancy_r",
+                    "Average expectancy (R)",
+                ),
+                (
+                    "avg_trade_dollars",
+                    "Average trade $",
+                ),
+            ]
+
+            for col, (
+                key,
+                label,
+            ) in zip(
+                cols2,
+                labels2,
+            ):
+
+                col.metric(
+                    label,
+                    stats.get(
+                        key,
+                        "—",
+                    ),
+                )
+
+            for warning in res.get(
+                "warnings",
+                [],
+            ):
+
+                st.warning(
+                    warning
+                )
+
+            if stats.get(
+                "trades",
+                0,
+            ) == 0:
+
+                st.info(
+                    "No fully confirmed BUY signals became trades during "
+                    "this period. That is a valid result; try a longer "
+                    "period before changing the strategy rules."
                 )
 
             if not res["equity"].empty:
@@ -1724,6 +1991,50 @@ with tab2:
                 width="stretch",
                 hide_index=True,
             )
+
+            if not res["trades"].empty:
+
+                st.download_button(
+                    "Download simulated trades",
+                    data=res["trades"].to_csv(
+                        index=False
+                    ).encode(
+                        "utf-8"
+                    ),
+                    file_name="v3_2_swing_backtest_trades.csv",
+                    mime="text/csv",
+                    width="stretch",
+                )
+
+            with st.expander(
+                "Show historical signal audit"
+            ):
+
+                st.caption(
+                    "This table records each reconstructed daily and "
+                    "intraday decision, including signals that never became "
+                    "a trade."
+                )
+
+                st.dataframe(
+                    res["signal_log"],
+                    width="stretch",
+                    hide_index=True,
+                )
+
+                if not res["signal_log"].empty:
+
+                    st.download_button(
+                        "Download signal audit",
+                        data=res["signal_log"].to_csv(
+                            index=False
+                        ).encode(
+                            "utf-8"
+                        ),
+                        file_name="v3_2_signal_audit.csv",
+                        mime="text/csv",
+                        width="stretch",
+                    )
 
 
 # ============================================================

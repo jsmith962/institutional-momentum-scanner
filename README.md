@@ -1,4 +1,4 @@
-# Institutional Swing Scanner v3.1
+# Institutional Swing Scanner v3.2
 
 A Streamlit research scanner for liquid U.S. stocks. It combines daily swing
 structure with live intraday confirmation and does not place orders.
@@ -22,6 +22,31 @@ structure with live intraday confirmation and does not place orders.
 These rules are designed to reduce false positives. They do not guarantee a
 profit or establish that the strategy has an edge. Validate with walk-forward,
 out-of-sample and paper-trading results before using real money.
+
+## v3.2 production-equivalent swing backtester
+
+- Reconstructs the same daily scorer, SPY/QQQ regime rules, relative-strength
+  gate, catalyst protection, intraday classifier and confirmation gate used by
+  the live scanner.
+- Builds the current daily candle only from minute bars visible at the selected
+  historical scan time, preventing the completed day's close from leaking into
+  an earlier decision.
+- Fills confirmed BUY signals on the next available minute rather than the bar
+  that created the signal.
+- Simulates a cash-limited portfolio with stop-based sizing, configurable risk,
+  maximum open positions, slippage and fees.
+- Holds positions across sessions, fills overnight gaps at the opening price,
+  sells half at 2R, moves the remaining stop to breakeven, targets 3R and exits
+  on the next session after a completed close below the 20-day EMA.
+- Produces an equity curve, drawdown, profit factor, average expectancy in R,
+  complete trade ledger and historical signal audit.
+- Uses conservative stop-first handling when one minute touches both a stop and
+  a target and the true intrabar sequence is unknown.
+
+The v3.2 backtest evaluates only the comparison symbols entered by the user.
+It does not yet reconstruct the full point-in-time U.S. stock universe and can
+still contain selection or survivorship bias. A small trade sample is not
+evidence of profitability.
 
 ## Required Streamlit secrets
 
@@ -52,8 +77,8 @@ streamlit run app.py
 python -m unittest discover -s tests -v
 ```
 
-## Important backtest limitation
+## Backtest interpretation
 
-The current `$2,000 Backtester` simulates the intraday confirmation engine. It
-does not yet reproduce the entire daily-plus-intraday v3.1 selection pipeline,
-so its results must not be treated as validation of the live scanner.
+Use at least ten liquid comparison symbols, realistic slippage and a long enough
+period to generate many independent trades. The rule score is not a predicted
+win probability, and all displayed results remain hypothetical.
