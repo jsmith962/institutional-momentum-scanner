@@ -2931,11 +2931,12 @@ with tab2:
 
 with tab3:
 
-    render_calibration_lab(
-        st.session_state.latest_backtest_result
-    )
+    if st.session_state.latest_backtest_result is not None:
+        render_calibration_lab(
+            st.session_state.latest_backtest_result
+        )
 
-    st.divider()
+        st.divider()
 
     st.subheader(
         "Strategy Calibration & Validation"
