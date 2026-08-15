@@ -32,6 +32,7 @@ from alerts import (
 )
 
 from validation import chronological_validation
+from calibration_ui import render_calibration_lab
 
 
 # ============================================================
@@ -2929,6 +2930,12 @@ with tab2:
 # ============================================================
 
 with tab3:
+
+    render_calibration_lab(
+        st.session_state.latest_backtest_result
+    )
+
+    st.divider()
 
     st.subheader(
         "Strategy Calibration & Validation"
