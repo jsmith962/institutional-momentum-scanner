@@ -30,7 +30,7 @@ from alerts import (
     build_buy_message,
     build_sell_message,
 )
-from validation import validate_candidate, validation_summary
+
 
 # ============================================================
 # APP CONFIGURATION
@@ -206,6 +206,7 @@ def why_not_buy(row):
         )
 
     leadership = row.get("leadership_percentile")
+
     if leadership is not None and not pd.isna(leadership):
         if float(leadership) < 70:
             failures.append(
@@ -267,11 +268,13 @@ def render_trade_card(row, rank_num=None):
             )
         else:
             leadership = row.get("leadership_percentile")
+
             leadership_text = (
                 "N/A"
                 if leadership is None or pd.isna(leadership)
                 else f"{float(leadership):.0f}th percentile"
             )
+
             st.caption(
                 f"Risk gate: PASS • Market leadership: {leadership_text} • "
                 f"Distribution days: {int(row.get('distribution_days', 0))}"
@@ -878,6 +881,7 @@ with tab1:
                         if intraday_signal == "BUY"
                         else intraday_signal
                     )
+
                     confluence_reason = (
                         "Daily swing history is unavailable, so an intraday BUY "
                         "cannot be promoted to a final BUY."
