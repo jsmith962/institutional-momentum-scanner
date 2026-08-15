@@ -31,6 +31,8 @@ from alerts import (
     build_sell_message,
 )
 
+from validation import chronological_validation
+
 
 # ============================================================
 # APP CONFIGURATION
@@ -41,27 +43,40 @@ load_dotenv()
 ET = ZoneInfo("America/New_York")
 
 st.set_page_config(
-    page_title="Institutional Swing Scanner v3.2.1",
+    page_title="Institutional Swing Scanner v3.3",
     layout="wide",
 )
 
-st.title("Institutional Swing Scanner v3.2.1")
+st.title("Institutional Swing Scanner v3.3")
 
 st.caption(
     "Full U.S. market • catalyst-gap protection • daily + intraday confirmation • "
-    "SMS alerts • production-equivalent swing backtester • no live orders"
+    "SMS alerts • production-equivalent backtesting • out-of-sample validation • "
+    "no live orders"
 )
 
-tab1, tab2 = st.tabs(
+tab1, tab2, tab3 = st.tabs(
     [
         "Live Swing Scanner",
         "$2,000 Swing Backtester",
+        "Calibration & Validation",
     ]
 )
 
 
 # ============================================================
-# HELPER FUNCTIONS FOR MOBILE DISPLAY
+# SESSION STORAGE
+# ============================================================
+
+if "latest_backtest_result" not in st.session_state:
+    st.session_state.latest_backtest_result = None
+
+if "latest_backtest_settings" not in st.session_state:
+    st.session_state.latest_backtest_settings = None
+
+
+# ============================================================
+# HELPER FUNCTIONS
 # ============================================================
 
 def money(value):
@@ -91,28 +106,54 @@ def rr_display(value):
         return "N/A"
 
 
+def pct_display(value):
+    try:
+        if pd.isna(value):
+            return "N/A"
+        return f"{float(value):.1f}%"
+    except Exception:
+        return "N/A"
+
+
 def action_text(signal):
     if signal == "A+ SWING BUY":
         return "BUY — top-tier setup confirmed"
+
     if signal == "BUY":
         return "BUY — entry rules confirmed"
+
     if signal == "WATCH":
         return "WAIT FOR BUY TRIGGER"
+
     if signal == "TOO EXTENDED":
         return "WAIT FOR PULLBACK / RETEST"
+
     if signal == "AVOID":
         return "PASS"
+
     return "WAIT"
 
 
 def signal_icon(signal):
     if signal in ["A+ SWING BUY", "BUY"]:
         return "🟢"
+
     if signal == "WATCH":
         return "🟡"
+
     if signal == "TOO EXTENDED":
         return "🔴"
+
     return "⚪"
+
+
+def safe_float(value, default=0.0):
+    try:
+        if value is None or pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
 
 
 def why_not_buy(row):
@@ -143,20 +184,20 @@ def why_not_buy(row):
 
     failures = []
 
-    try:
-        swing_score = float(row.get("swing_score", 0))
-    except Exception:
-        swing_score = 0
+    swing_score = safe_float(
+        row.get("swing_score"),
+        0,
+    )
 
-    try:
-        entry_quality = float(row.get("entry_quality", 0))
-    except Exception:
-        entry_quality = 0
+    entry_quality = safe_float(
+        row.get("entry_quality"),
+        0,
+    )
 
-    try:
-        reward_risk = float(row.get("reward_risk", 0))
-    except Exception:
-        reward_risk = 0
+    reward_risk = safe_float(
+        row.get("reward_risk"),
+        0,
+    )
 
     try:
         price = float(row.get("price", 0))
@@ -196,7 +237,12 @@ def why_not_buy(row):
         )
 
     try:
-        distribution_days = int(row.get("distribution_days", 0))
+        distribution_days = int(
+            row.get(
+                "distribution_days",
+                0,
+            )
+        )
     except Exception:
         distribution_days = 0
 
@@ -205,20 +251,33 @@ def why_not_buy(row):
             f"{distribution_days} recent distribution days show excessive selling pressure"
         )
 
-    leadership = row.get("leadership_percentile")
+    leadership = row.get(
+        "leadership_percentile"
+    )
 
-    if leadership is not None and not pd.isna(leadership):
-        if float(leadership) < 70:
-            failures.append(
-                f"Market leadership rank {float(leadership):.0f}% is below the 70% BUY gate"
-            )
+    if (
+        leadership is not None
+        and not pd.isna(leadership)
+        and float(leadership) < 70
+    ):
+        failures.append(
+            f"Market leadership rank {float(leadership):.0f}% is below the 70% BUY gate"
+        )
 
-    if not bool(row.get("intraday_confirmed", True)):
+    if not bool(
+        row.get(
+            "intraday_confirmed",
+            True,
+        )
+    ):
         failures.append(
             "Live intraday BUY confirmation has not passed"
         )
 
-    if not failures and signal == "WATCH":
+    if (
+        not failures
+        and signal == "WATCH"
+    ):
         failures.append(
             "Visible price, score and risk gates pass, but the broader "
             "market/regime confirmation has not yet passed the BUY requirement"
@@ -227,10 +286,15 @@ def why_not_buy(row):
     if not failures:
         return "Waiting for additional confirmation."
 
-    return " • ".join(failures)
+    return " • ".join(
+        failures
+    )
 
 
-def render_trade_card(row, rank_num=None):
+def render_trade_card(
+    row,
+    rank_num=None,
+):
     symbol = row["symbol"]
     signal = row["signal"]
 
@@ -240,92 +304,139 @@ def render_trade_card(row, rank_num=None):
         else ""
     )
 
-    with st.container(border=True):
+    with st.container(
+        border=True
+    ):
+
         st.markdown(
             f"### {title_prefix}{signal_icon(signal)} {symbol} — {signal}"
         )
 
         st.write(
-            f"**Swing Score:** {score_display(row.get('swing_score'))}/100"
+            f"**Swing Score:** "
+            f"{score_display(row.get('swing_score'))}/100"
         )
 
         st.write(
-            f"**Setup:** {row.get('setup', '')}"
+            f"**Setup:** "
+            f"{row.get('setup', '')}"
         )
 
         st.write(
-            f"**Current Price:** {money(row.get('price'))}"
+            f"**Current Price:** "
+            f"{money(row.get('price'))}"
         )
 
         st.write(
-            f"**Entry Quality:** {score_display(row.get('entry_quality'))}/15"
+            f"**Entry Quality:** "
+            f"{score_display(row.get('entry_quality'))}/15"
         )
 
-        if bool(row.get("risk_flag", False)):
+        if bool(
+            row.get(
+                "risk_flag",
+                False,
+            )
+        ):
+
             st.error(
                 "**Risk Event:** "
-                + str(row.get("risk_reason", "Hard risk gate active"))
+                + str(
+                    row.get(
+                        "risk_reason",
+                        "Hard risk gate active",
+                    )
+                )
             )
+
         else:
-            leadership = row.get("leadership_percentile")
+
+            leadership = row.get(
+                "leadership_percentile"
+            )
 
             leadership_text = (
                 "N/A"
-                if leadership is None or pd.isna(leadership)
+                if (
+                    leadership is None
+                    or pd.isna(leadership)
+                )
                 else f"{float(leadership):.0f}th percentile"
             )
 
             st.caption(
-                f"Risk gate: PASS • Market leadership: {leadership_text} • "
-                f"Distribution days: {int(row.get('distribution_days', 0))}"
+                f"Risk gate: PASS • "
+                f"Market leadership: {leadership_text} • "
+                f"Distribution days: "
+                f"{int(row.get('distribution_days', 0))}"
             )
 
-        st.markdown("#### Entry Plan")
+        st.markdown(
+            "#### Entry Plan"
+        )
 
         st.write(
             f"**Preferred Entry Zone:** "
-            f"{money(row.get('entry_low'))} – {money(row.get('entry_high'))}"
+            f"{money(row.get('entry_low'))} – "
+            f"{money(row.get('entry_high'))}"
         )
 
         st.write(
-            f"**Stop:** {money(row.get('stop'))}"
+            f"**Stop:** "
+            f"{money(row.get('stop'))}"
         )
 
         st.write(
-            f"**Target 1:** {money(row.get('target1'))}"
+            f"**Target 1:** "
+            f"{money(row.get('target1'))}"
         )
 
         st.write(
-            f"**Target 2:** {money(row.get('target2'))}"
+            f"**Target 2:** "
+            f"{money(row.get('target2'))}"
         )
 
         st.write(
-            f"**Reward / Risk:** {rr_display(row.get('reward_risk'))}"
+            f"**Reward / Risk:** "
+            f"{rr_display(row.get('reward_risk'))}"
         )
 
-        st.markdown("#### Action")
+        st.markdown(
+            "#### Action"
+        )
 
-        if signal in ["A+ SWING BUY", "BUY"]:
+        if signal in [
+            "A+ SWING BUY",
+            "BUY",
+        ]:
+
             st.success(
                 action_text(signal)
             )
 
         elif signal == "WATCH":
+
             st.warning(
                 action_text(signal)
             )
 
         elif signal == "TOO EXTENDED":
+
             st.error(
                 action_text(signal)
             )
 
         else:
+
             st.info(
                 action_text(signal)
             )
 
-        if signal not in ["A+ SWING BUY", "BUY"]:
+        if signal not in [
+            "A+ SWING BUY",
+            "BUY",
+        ]:
+
             st.markdown(
                 "#### Why Not BUY Yet?"
             )
@@ -335,6 +446,7 @@ def render_trade_card(row, rank_num=None):
             )
 
         else:
+
             st.markdown(
                 "#### Why BUY?"
             )
@@ -351,13 +463,218 @@ def render_trade_card(row, rank_num=None):
         )
 
 
+def calibration_summary(
+    signal_log,
+):
+    """
+    Diagnostic threshold sensitivity.
+
+    IMPORTANT:
+    This does NOT recalculate trades under altered thresholds.
+    It only shows how many historical observations would clear
+    selected score/quality/confirmation levels.
+    """
+
+    if (
+        signal_log is None
+        or signal_log.empty
+    ):
+        return pd.DataFrame()
+
+    frame = signal_log.copy()
+
+    required = [
+        "swing_score",
+        "intraday_score",
+        "entry_quality",
+    ]
+
+    for column in required:
+        if column not in frame:
+            return pd.DataFrame()
+
+    for column in required:
+        frame[column] = pd.to_numeric(
+            frame[column],
+            errors="coerce",
+        )
+
+    rows = []
+
+    score_levels = [
+        85.0,
+        82.5,
+        80.0,
+        77.5,
+        75.0,
+    ]
+
+    intraday_levels = [
+        85.0,
+        80.0,
+        75.0,
+    ]
+
+    quality_levels = [
+        10.0,
+        12.0,
+        15.0,
+    ]
+
+    total = len(frame)
+
+    for swing_threshold in score_levels:
+
+        for intraday_threshold in intraday_levels:
+
+            for quality_threshold in quality_levels:
+
+                mask = (
+                    (
+                        frame["swing_score"]
+                        >= swing_threshold
+                    )
+                    & (
+                        frame["intraday_score"]
+                        >= intraday_threshold
+                    )
+                    & (
+                        frame["entry_quality"]
+                        >= quality_threshold
+                    )
+                )
+
+                if (
+                    "risk_flag"
+                    in frame.columns
+                ):
+
+                    mask = (
+                        mask
+                        & ~frame[
+                            "risk_flag"
+                        ].fillna(
+                            False
+                        ).astype(
+                            bool
+                        )
+                    )
+
+                if (
+                    "trend_health"
+                    in frame.columns
+                ):
+
+                    mask = (
+                        mask
+                        & frame[
+                            "trend_health"
+                        ].fillna(
+                            False
+                        ).astype(
+                            bool
+                        )
+                    )
+
+                if (
+                    "distribution_days"
+                    in frame.columns
+                ):
+
+                    distribution = pd.to_numeric(
+                        frame[
+                            "distribution_days"
+                        ],
+                        errors="coerce",
+                    )
+
+                    mask = (
+                        mask
+                        & (
+                            distribution
+                            <= 4
+                        )
+                    )
+
+                if (
+                    "leadership_percentile"
+                    in frame.columns
+                ):
+
+                    leadership = pd.to_numeric(
+                        frame[
+                            "leadership_percentile"
+                        ],
+                        errors="coerce",
+                    )
+
+                    mask = (
+                        mask
+                        & (
+                            leadership.isna()
+                            | (
+                                leadership
+                                >= 70
+                            )
+                        )
+                    )
+
+                count = int(
+                    mask.sum()
+                )
+
+                rows.append(
+                    {
+                        "Swing threshold": swing_threshold,
+                        "Intraday threshold": intraday_threshold,
+                        "Entry quality": quality_threshold,
+                        "Historical candidates": count,
+                        "% observations": (
+                            round(
+                                count
+                                / max(
+                                    total,
+                                    1,
+                                )
+                                * 100,
+                                2,
+                            )
+                        ),
+                    }
+                )
+
+    result = pd.DataFrame(
+        rows
+    )
+
+    return (
+        result.sort_values(
+            [
+                "Historical candidates",
+                "Swing threshold",
+                "Intraday threshold",
+            ],
+            ascending=[
+                False,
+                False,
+                False,
+            ],
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
 # ============================================================
 # SIDEBAR
 # ============================================================
 
 with st.sidebar:
 
-    st.header("Text alerts")
+    st.header(
+        "Text alerts"
+    )
 
     sms_enabled = st.toggle(
         "Send SMS alerts",
@@ -381,16 +698,22 @@ with st.sidebar:
     if sms_enabled:
 
         if sms_configured():
-            st.success("SMS configured")
+
+            st.success(
+                "SMS configured"
+            )
 
         else:
+
             st.warning(
                 "SMS secrets are not configured yet."
             )
 
     st.divider()
 
-    st.subheader("Tracked positions")
+    st.subheader(
+        "Tracked positions"
+    )
 
     tracked_positions = st.text_input(
         "Symbols you currently hold",
@@ -424,11 +747,16 @@ with tab1:
         "the live intraday confirmation also passes."
     )
 
-    c1, c2 = st.columns(2)
+    c1, c2 = st.columns(
+        2
+    )
 
     feed = c1.selectbox(
         "Data feed",
-        ["iex", "sip"],
+        [
+            "iex",
+            "sip",
+        ],
         index=0,
     )
 
@@ -446,14 +774,18 @@ with tab1:
         width="stretch",
     ):
 
-        os.environ["ALPACA_FEED"] = feed
+        os.environ[
+            "ALPACA_FEED"
+        ] = feed
 
         status = st.status(
             "Scanning the U.S. market...",
             expanded=True,
         )
 
-        progress = st.progress(0)
+        progress = st.progress(
+            0
+        )
 
         try:
 
@@ -461,24 +793,49 @@ with tab1:
                 "1/5 Filtering eligible U.S. securities..."
             )
 
-            elig = eligible_us_equity_universe()
-            universe = elig.symbol.tolist()
-
-            status.write(
-                f"Eligible after type filtering: {len(universe):,}"
+            elig = (
+                eligible_us_equity_universe()
             )
 
-            now = datetime.now(ET)
-            daily_start = now - timedelta(days=45)
+            universe = (
+                elig.symbol.tolist()
+            )
+
+            status.write(
+                f"Eligible after type filtering: "
+                f"{len(universe):,}"
+            )
+
+            now = datetime.now(
+                ET
+            )
+
+            daily_start = (
+                now
+                - timedelta(
+                    days=45
+                )
+            )
 
             status.write(
                 "2/5 Applying price, liquidity, trend and momentum filters..."
             )
 
-            def prog(done, total):
+            def prog(
+                done,
+                total,
+            ):
+
                 progress.progress(
                     min(
-                        int(done / max(total, 1) * 40),
+                        int(
+                            done
+                            / max(
+                                total,
+                                1,
+                            )
+                            * 40
+                        ),
                         40,
                     )
                 )
@@ -495,14 +852,22 @@ with tab1:
             )
 
             if daily.empty:
+
                 status.update(
-                    label="No daily market data returned.",
+                    label=(
+                        "No daily market data returned."
+                    ),
                     state="error",
                 )
+
                 st.stop()
 
-            daily["timestamp"] = pd.to_datetime(
-                daily["timestamp"],
+            daily[
+                "timestamp"
+            ] = pd.to_datetime(
+                daily[
+                    "timestamp"
+                ],
                 utc=True,
             )
 
@@ -516,24 +881,39 @@ with tab1:
             )
 
             if finalists.empty:
+
                 status.update(
-                    label="No qualifying finalists found.",
+                    label=(
+                        "No qualifying finalists found."
+                    ),
                     state="complete",
                 )
+
                 st.stop()
 
             status.write(
-                f"Finalists after eligibility filters: {len(finalists)}"
+                f"Finalists after eligibility filters: "
+                f"{len(finalists)}"
             )
 
-            progress.progress(45)
+            progress.progress(
+                45
+            )
 
             status.write(
                 "3/5 Pulling longer daily history for swing-trade analysis..."
             )
 
-            finalist_symbols = finalists.symbol.tolist()
-            swing_start = now - timedelta(days=420)
+            finalist_symbols = (
+                finalists.symbol.tolist()
+            )
+
+            swing_start = (
+                now
+                - timedelta(
+                    days=420
+                )
+            )
 
             swing_daily = get_bars_batched(
                 finalist_symbols,
@@ -546,7 +926,10 @@ with tab1:
             )
 
             market_daily = get_bars(
-                ["SPY", "QQQ"],
+                [
+                    "SPY",
+                    "QQQ",
+                ],
                 swing_start,
                 now,
                 "1Day",
@@ -554,20 +937,33 @@ with tab1:
             )
 
             if not swing_daily.empty:
-                swing_daily["timestamp"] = pd.to_datetime(
-                    swing_daily["timestamp"],
+
+                swing_daily[
+                    "timestamp"
+                ] = pd.to_datetime(
+                    swing_daily[
+                        "timestamp"
+                    ],
                     utc=True,
                 )
 
             if not market_daily.empty:
-                market_daily["timestamp"] = pd.to_datetime(
-                    market_daily["timestamp"],
+
+                market_daily[
+                    "timestamp"
+                ] = pd.to_datetime(
+                    market_daily[
+                        "timestamp"
+                    ],
                     utc=True,
                 )
 
             spy_daily = (
                 market_daily[
-                    market_daily["symbol"] == "SPY"
+                    market_daily[
+                        "symbol"
+                    ]
+                    == "SPY"
                 ].copy()
                 if not market_daily.empty
                 else pd.DataFrame()
@@ -575,32 +971,44 @@ with tab1:
 
             qqq_daily = (
                 market_daily[
-                    market_daily["symbol"] == "QQQ"
+                    market_daily[
+                        "symbol"
+                    ]
+                    == "QQQ"
                 ].copy()
                 if not market_daily.empty
                 else pd.DataFrame()
             )
 
-            leadership_map = relative_strength_percentiles(
-                swing_daily
+            leadership_map = (
+                relative_strength_percentiles(
+                    swing_daily
+                )
             )
 
-            progress.progress(60)
+            progress.progress(
+                60
+            )
 
             status.write(
                 "4/5 Pulling intraday bars for finalists and SPY..."
             )
 
-            market_start = now.replace(
-                hour=9,
-                minute=30,
-                second=0,
-                microsecond=0,
+            market_start = (
+                now.replace(
+                    hour=9,
+                    minute=30,
+                    second=0,
+                    microsecond=0,
+                )
             )
 
             intra = get_bars_batched(
                 finalist_symbols,
-                market_start - timedelta(days=1),
+                market_start
+                - timedelta(
+                    days=1
+                ),
                 now,
                 "1Min",
                 feed,
@@ -609,36 +1017,57 @@ with tab1:
             )
 
             spy = get_bars(
-                ["SPY"],
-                market_start - timedelta(days=1),
+                [
+                    "SPY",
+                ],
+                market_start
+                - timedelta(
+                    days=1
+                ),
                 now,
                 "1Min",
                 feed,
             )
 
-            progress.progress(75)
+            progress.progress(
+                75
+            )
 
             if intra.empty:
+
                 status.update(
-                    label="No intraday bars returned.",
+                    label=(
+                        "No intraday bars returned."
+                    ),
                     state="error",
                 )
+
                 st.stop()
 
-            intra["timestamp"] = pd.to_datetime(
-                intra["timestamp"],
+            intra[
+                "timestamp"
+            ] = pd.to_datetime(
+                intra[
+                    "timestamp"
+                ],
                 utc=True,
             )
 
-            spy["timestamp"] = pd.to_datetime(
-                spy["timestamp"],
+            spy[
+                "timestamp"
+            ] = pd.to_datetime(
+                spy[
+                    "timestamp"
+                ],
                 utc=True,
             )
 
             latest = (
                 intra.timestamp
                 .dt
-                .tz_convert(ET)
+                .tz_convert(
+                    ET
+                )
                 .dt
                 .date
                 .max()
@@ -647,7 +1076,9 @@ with tab1:
             today = intra[
                 intra.timestamp
                 .dt
-                .tz_convert(ET)
+                .tz_convert(
+                    ET
+                )
                 .dt
                 .date
                 == latest
@@ -656,16 +1087,22 @@ with tab1:
             spy_today = spy[
                 spy.timestamp
                 .dt
-                .tz_convert(ET)
+                .tz_convert(
+                    ET
+                )
                 .dt
                 .date
                 == latest
             ]
 
-            fmap = finalists.set_index(
-                "symbol"
-            ).to_dict(
-                "index"
+            fmap = (
+                finalists
+                .set_index(
+                    "symbol"
+                )
+                .to_dict(
+                    "index"
+                )
             )
 
             advmap = dict(
@@ -682,7 +1119,12 @@ with tab1:
 
             rows = []
 
-            for sym, d in today.groupby("symbol"):
+            for (
+                sym,
+                d,
+            ) in today.groupby(
+                "symbol"
+            ):
 
                 if len(d) < 20:
                     continue
@@ -710,7 +1152,10 @@ with tab1:
                         )
                     )
                     / px
-                    if advmap.get(sym, 0)
+                    if advmap.get(
+                        sym,
+                        0,
+                    )
                     else None
                 )
 
@@ -723,9 +1168,15 @@ with tab1:
                 if p.empty:
                     continue
 
-                r = p.iloc[-1]
+                r = p.iloc[
+                    -1
+                ]
 
-                intraday_score, intraday_signal, reasons = classify(
+                (
+                    intraday_score,
+                    intraday_signal,
+                    reasons,
+                ) = classify(
                     r,
                     advmap.get(
                         sym,
@@ -733,21 +1184,32 @@ with tab1:
                     ),
                 )
 
-                stock_swing_daily = pd.DataFrame()
+                stock_swing_daily = (
+                    pd.DataFrame()
+                )
 
                 if not swing_daily.empty:
-                    stock_swing_daily = swing_daily[
-                        swing_daily["symbol"] == sym
-                    ].copy()
+
+                    stock_swing_daily = (
+                        swing_daily[
+                            swing_daily[
+                                "symbol"
+                            ]
+                            == sym
+                        ].copy()
+                    )
 
                 swing = None
 
                 if not stock_swing_daily.empty:
+
                     swing = score_swing_daily(
                         stock_swing_daily,
                         spy_daily,
                         qqq_daily,
-                        leadership_map.get(sym),
+                        leadership_map.get(
+                            sym
+                        ),
                     )
 
                 swing_signal = "N/A"
@@ -773,14 +1235,18 @@ with tab1:
 
                 if swing:
 
-                    swing_signal = swing.get(
-                        "signal",
-                        "N/A",
+                    swing_signal = (
+                        swing.get(
+                            "signal",
+                            "N/A",
+                        )
                     )
 
-                    swing_score = swing.get(
-                        "swing_score",
-                        0,
+                    swing_score = (
+                        swing.get(
+                            "swing_score",
+                            0,
+                        )
                     )
 
                     setup = swing.get(
@@ -788,41 +1254,59 @@ with tab1:
                         "",
                     )
 
-                    entry_quality = swing.get(
-                        "entry_quality",
-                        0,
+                    entry_quality = (
+                        swing.get(
+                            "entry_quality",
+                            0,
+                        )
                     )
 
-                    entry_low = swing.get(
-                        "entry_low"
+                    entry_low = (
+                        swing.get(
+                            "entry_low"
+                        )
                     )
 
-                    entry_high = swing.get(
-                        "entry_high"
+                    entry_high = (
+                        swing.get(
+                            "entry_high"
+                        )
                     )
 
-                    stop = swing.get(
-                        "stop"
+                    stop = (
+                        swing.get(
+                            "stop"
+                        )
                     )
 
-                    target1 = swing.get(
-                        "target1"
+                    target1 = (
+                        swing.get(
+                            "target1"
+                        )
                     )
 
-                    target2 = swing.get(
-                        "target2"
+                    target2 = (
+                        swing.get(
+                            "target2"
+                        )
                     )
 
-                    reward_risk = swing.get(
-                        "reward_risk"
+                    reward_risk = (
+                        swing.get(
+                            "reward_risk"
+                        )
                     )
 
-                    swing_rsi = swing.get(
-                        "rsi14"
+                    swing_rsi = (
+                        swing.get(
+                            "rsi14"
+                        )
                     )
 
-                    swing_rvol = swing.get(
-                        "rvol"
+                    swing_rvol = (
+                        swing.get(
+                            "rvol"
+                        )
                     )
 
                     risk_flag = bool(
@@ -832,18 +1316,24 @@ with tab1:
                         )
                     )
 
-                    risk_reason = swing.get(
-                        "risk_reason",
-                        "",
+                    risk_reason = (
+                        swing.get(
+                            "risk_reason",
+                            "",
+                        )
                     )
 
-                    gap_down_pct = swing.get(
-                        "gap_down_pct",
-                        0,
+                    gap_down_pct = (
+                        swing.get(
+                            "gap_down_pct",
+                            0,
+                        )
                     )
 
-                    event_days_ago = swing.get(
-                        "event_days_ago"
+                    event_days_ago = (
+                        swing.get(
+                            "event_days_ago"
+                        )
                     )
 
                     trend_health = bool(
@@ -853,32 +1343,43 @@ with tab1:
                         )
                     )
 
-                    distribution_days = swing.get(
-                        "distribution_days",
-                        0,
+                    distribution_days = (
+                        swing.get(
+                            "distribution_days",
+                            0,
+                        )
                     )
 
-                    leadership_percentile = swing.get(
-                        "leadership_percentile"
+                    leadership_percentile = (
+                        swing.get(
+                            "leadership_percentile"
+                        )
                     )
 
-                    market_score = swing.get(
-                        "market_score"
+                    market_score = (
+                        swing.get(
+                            "market_score"
+                        )
                     )
 
                 if swing:
-                    final_signal, confluence_reason = (
-                        combine_daily_intraday_signal(
-                            swing_signal,
-                            intraday_signal,
-                            intraday_score,
-                            risk_flag=risk_flag,
-                        )
+
+                    (
+                        final_signal,
+                        confluence_reason,
+                    ) = combine_daily_intraday_signal(
+                        swing_signal,
+                        intraday_signal,
+                        intraday_score,
+                        risk_flag=risk_flag,
                     )
+
                 else:
+
                     final_signal = (
                         "WATCH"
-                        if intraday_signal == "BUY"
+                        if intraday_signal
+                        == "BUY"
                         else intraday_signal
                     )
 
@@ -888,62 +1389,90 @@ with tab1:
                     )
 
                 intraday_confirmed = bool(
-                    intraday_signal == "BUY"
-                    and intraday_score >= 85
+                    intraday_signal
+                    == "BUY"
+                    and intraday_score
+                    >= 85
                 )
 
                 if risk_flag:
 
-                    decision_reason = risk_reason
+                    decision_reason = (
+                        risk_reason
+                    )
 
                 elif (
-                    final_signal == "WATCH"
+                    final_signal
+                    == "WATCH"
                     and (
                         not swing
-                        or swing_signal in [
+                        or swing_signal
+                        in [
                             "A+ SWING BUY",
                             "BUY",
                         ]
                     )
                 ):
 
-                    decision_reason = confluence_reason
-
-                elif final_signal == "A+ SWING BUY":
-
                     decision_reason = (
-                        "Top-tier daily setup and live intraday entry confirmation passed."
+                        confluence_reason
                     )
 
-                elif final_signal == "BUY":
+                elif (
+                    final_signal
+                    == "A+ SWING BUY"
+                ):
 
                     decision_reason = (
-                        "Daily swing setup and live intraday entry confirmation passed."
+                        "Top-tier daily setup and live intraday "
+                        "entry confirmation passed."
                     )
 
-                elif final_signal == "WATCH":
+                elif (
+                    final_signal
+                    == "BUY"
+                ):
 
                     decision_reason = (
-                        "Promising setup; wait for a better entry or "
-                        "additional confirmation."
+                        "Daily swing setup and live intraday "
+                        "entry confirmation passed."
                     )
 
-                elif final_signal == "TOO EXTENDED":
+                elif (
+                    final_signal
+                    == "WATCH"
+                ):
+
+                    decision_reason = (
+                        "Promising setup; wait for a better entry "
+                        "or additional confirmation."
+                    )
+
+                elif (
+                    final_signal
+                    == "TOO EXTENDED"
+                ):
 
                     decision_reason = (
                         "Strong stock but poor entry right now. "
                         "Wait for a pullback or retest."
                     )
 
-                elif final_signal == "AVOID":
+                elif (
+                    final_signal
+                    == "AVOID"
+                ):
 
                     decision_reason = (
                         "Not enough alignment for a high-quality swing entry."
                     )
 
                 else:
-                    decision_reason = "; ".join(
-                        reasons
+
+                    decision_reason = (
+                        "; ".join(
+                            reasons
+                        )
                     )
 
                 rows.append(
@@ -958,7 +1487,9 @@ with tab1:
                         "setup": setup,
                         "entry_quality": entry_quality,
                         "price": round(
-                            float(r.close),
+                            float(
+                                r.close
+                            ),
                             2,
                         ),
                         "entry_low": entry_low,
@@ -995,8 +1526,12 @@ with tab1:
                             2,
                         ),
                         "intraday_rsi": round(
-                            float(r.rsi)
-                            if pd.notna(r.rsi)
+                            float(
+                                r.rsi
+                            )
+                            if pd.notna(
+                                r.rsi
+                            )
                             else 50,
                             1,
                         ),
@@ -1029,8 +1564,10 @@ with tab1:
                         "price_check": "PASS",
                         "liquidity_check": "PASS",
                         "decision": decision_reason,
-                        "intraday_reasons": "; ".join(
-                            reasons
+                        "intraday_reasons": (
+                            "; ".join(
+                                reasons
+                            )
                         ),
                     }
                 )
@@ -1044,7 +1581,9 @@ with tab1:
             )
 
             status.update(
-                label="Swing scan complete.",
+                label=(
+                    "Swing scan complete."
+                ),
                 state="complete",
                 expanded=False,
             )
@@ -1067,10 +1606,18 @@ with tab1:
                     "N/A": 6,
                 }
 
-                out["_rank"] = (
-                    out["signal"]
-                    .map(rank)
-                    .fillna(6)
+                out[
+                    "_rank"
+                ] = (
+                    out[
+                        "signal"
+                    ]
+                    .map(
+                        rank
+                    )
+                    .fillna(
+                        6
+                    )
                 )
 
                 out = (
@@ -1095,7 +1642,9 @@ with tab1:
                 )
 
                 buys = out[
-                    out["signal"].isin(
+                    out[
+                        "signal"
+                    ].isin(
                         [
                             "A+ SWING BUY",
                             "BUY",
@@ -1104,20 +1653,17 @@ with tab1:
                 ]
 
                 watches = out[
-                    out["signal"] == "WATCH"
+                    out[
+                        "signal"
+                    ]
+                    == "WATCH"
                 ]
 
                 extended = out[
-                    out["signal"] == "TOO EXTENDED"
-                ]
-
-                avoid = out[
-                    out["signal"].isin(
-                        [
-                            "AVOID",
-                            "NO BUY",
-                        ]
-                    )
+                    out[
+                        "signal"
+                    ]
+                    == "TOO EXTENDED"
                 ]
 
                 if (
@@ -1132,9 +1678,14 @@ with tab1:
                         and not buys.empty
                     ):
 
-                        for _, alert_row in (
+                        for (
+                            _,
+                            alert_row,
+                        ) in (
                             buys
-                            .head(5)
+                            .head(
+                                5
+                            )
                             .iterrows()
                         ):
 
@@ -1147,7 +1698,8 @@ with tab1:
                                 )
 
                                 sent.append(
-                                    f"BUY {alert_row['symbol']}"
+                                    f"BUY "
+                                    f"{alert_row['symbol']}"
                                 )
 
                             except Exception as sms_error:
@@ -1160,7 +1712,10 @@ with tab1:
 
                     held = {
                         x.strip().upper()
-                        for x in tracked_positions.split(",")
+                        for x
+                        in tracked_positions.split(
+                            ","
+                        )
                         if x.strip()
                     }
 
@@ -1170,21 +1725,30 @@ with tab1:
                     ):
 
                         held_rows = out[
-                            out["symbol"].isin(
+                            out[
+                                "symbol"
+                            ].isin(
                                 held
                             )
                         ]
 
-                        for _, alert_row in held_rows.iterrows():
+                        for (
+                            _,
+                            alert_row,
+                        ) in held_rows.iterrows():
 
                             sell_reasons = []
 
                             current_price = float(
-                                alert_row["price"]
+                                alert_row[
+                                    "price"
+                                ]
                             )
 
                             current_vwap = float(
-                                alert_row["vwap"]
+                                alert_row[
+                                    "vwap"
+                                ]
                             )
 
                             current_intraday_score = int(
@@ -1199,13 +1763,19 @@ with tab1:
                                 ]
                             )
 
-                            if current_price < current_vwap:
+                            if (
+                                current_price
+                                < current_vwap
+                            ):
 
                                 sell_reasons.append(
                                     "price below VWAP"
                                 )
 
-                            if current_intraday_score < 60:
+                            if (
+                                current_intraday_score
+                                < 60
+                            ):
 
                                 sell_reasons.append(
                                     f"intraday score fell to "
@@ -1256,7 +1826,9 @@ with tab1:
 
                         st.info(
                             "Text alerts sent: "
-                            + ", ".join(sent)
+                            + ", ".join(
+                                sent
+                            )
                         )
 
                 st.divider()
@@ -1274,7 +1846,11 @@ with tab1:
 
                     st.write(
                         ", ".join(
-                            buys["symbol"].head(8)
+                            buys[
+                                "symbol"
+                            ].head(
+                                8
+                            )
                         )
                     )
 
@@ -1290,28 +1866,40 @@ with tab1:
                         "the signal to BUY or A+ SWING BUY."
                     )
 
-                m1, m2 = st.columns(2)
+                m1, m2 = st.columns(
+                    2
+                )
 
                 m1.metric(
                     "Finalists",
-                    len(out),
+                    len(
+                        out
+                    ),
                 )
 
                 m2.metric(
                     "Confirmed BUYs",
-                    len(buys),
+                    len(
+                        buys
+                    ),
                 )
 
-                m3, m4 = st.columns(2)
+                m3, m4 = st.columns(
+                    2
+                )
 
                 m3.metric(
                     "WATCH",
-                    len(watches),
+                    len(
+                        watches
+                    ),
                 )
 
                 m4.metric(
                     "TOO EXTENDED",
-                    len(extended),
+                    len(
+                        extended
+                    ),
                 )
 
                 st.divider()
@@ -1325,11 +1913,19 @@ with tab1:
                     "it does not mean buy now."
                 )
 
-                top_opportunities = out.head(
-                    5
+                top_opportunities = (
+                    out.head(
+                        5
+                    )
                 )
 
-                for rank_num, (_, row) in enumerate(
+                for (
+                    rank_num,
+                    (
+                        _,
+                        row,
+                    ),
+                ) in enumerate(
                     top_opportunities.iterrows(),
                     start=1,
                 ):
@@ -1347,9 +1943,14 @@ with tab1:
 
                 if not buys.empty:
 
-                    for _, row in (
+                    for (
+                        _,
+                        row,
+                    ) in (
                         buys
-                        .head(10)
+                        .head(
+                            10
+                        )
                         .iterrows()
                     ):
 
@@ -1376,9 +1977,14 @@ with tab1:
 
                 if not extended.empty:
 
-                    for _, row in (
+                    for (
+                        _,
+                        row,
+                    ) in (
                         extended
-                        .head(5)
+                        .head(
+                            5
+                        )
                         .iterrows()
                     ):
 
@@ -1413,7 +2019,9 @@ with tab1:
                     st.dataframe(
                         watches[
                             watch_columns
-                        ].head(30),
+                        ].head(
+                            30
+                        ),
                         width="stretch",
                         hide_index=True,
                     )
@@ -1430,15 +2038,23 @@ with tab1:
                     "Stock Detail"
                 )
 
-                selected_symbol = st.selectbox(
-                    "Select a stock",
-                    out["symbol"].tolist(),
+                selected_symbol = (
+                    st.selectbox(
+                        "Select a stock",
+                        out[
+                            "symbol"
+                        ].tolist(),
+                    )
                 )
 
                 selected = out[
-                    out["symbol"]
+                    out[
+                        "symbol"
+                    ]
                     == selected_symbol
-                ].iloc[0]
+                ].iloc[
+                    0
+                ]
 
                 render_trade_card(
                     selected
@@ -1503,26 +2119,35 @@ with tab1:
 
                     available_columns = [
                         col
-                        for col in display_columns
-                        if col in out.columns
+                        for col
+                        in display_columns
+                        if col
+                        in out.columns
                     ]
 
                     st.dataframe(
                         out[
                             available_columns
-                        ].head(50),
+                        ].head(
+                            50
+                        ),
                         width="stretch",
                         hide_index=True,
                     )
 
                 st.download_button(
                     "Download latest swing scan",
-                    data=out.to_csv(
-                        index=False
-                    ).encode(
-                        "utf-8"
+                    data=(
+                        out.to_csv(
+                            index=False
+                        )
+                        .encode(
+                            "utf-8"
+                        )
                     ),
-                    file_name="swing_scan_latest.csv",
+                    file_name=(
+                        "swing_scan_latest.csv"
+                    ),
                     mime="text/csv",
                     width="stretch",
                 )
@@ -1530,12 +2155,16 @@ with tab1:
         except Exception as e:
 
             status.update(
-                label="Scan stopped because of an error.",
+                label=(
+                    "Scan stopped because of an error."
+                ),
                 state="error",
             )
 
             st.error(
-                str(e)
+                str(
+                    e
+                )
             )
 
             st.info(
@@ -1573,16 +2202,20 @@ with tab2:
 
     start_date = c1.date_input(
         "Start",
-        datetime.now(ET).date()
+        datetime.now(
+            ET
+        ).date()
         - timedelta(
-            days=180,
+            days=180
         ),
         key="swing_bt_start",
     )
 
     end_date = c2.date_input(
         "End",
-        datetime.now(ET).date()
+        datetime.now(
+            ET
+        ).date()
         - timedelta(
             days=1
         ),
@@ -1692,42 +2325,67 @@ with tab2:
 
         syms = [
             x.strip().upper()
-            for x in symbols.split(",")
+            for x
+            in symbols.split(
+                ","
+            )
             if x.strip()
         ]
 
-        if start_date >= end_date:
+        if (
+            start_date
+            >= end_date
+        ):
+
             st.error(
                 "Choose a start date before the end date."
             )
+
             st.stop()
 
-        if (end_date - start_date).days > 365:
+        if (
+            end_date
+            - start_date
+        ).days > 365:
+
             st.warning(
                 "A range longer than one year can be slow or exceed the "
                 "minute-data limit. Start with 6–12 months, then test "
                 "additional non-overlapping periods."
             )
 
-        if len(syms) < 5:
+        if len(
+            syms
+        ) < 5:
+
             st.error(
                 "Enter at least 5 symbols so the relative-strength ranking "
                 "has a meaningful comparison group."
             )
+
             st.stop()
 
-        if len(syms) < 10:
+        if len(
+            syms
+        ) < 10:
+
             st.warning(
                 "Fewer than 10 symbols can make leadership percentiles "
                 "unstable. Ten or more is recommended."
             )
 
-        request_end = end_date + timedelta(
-            days=1,
+        request_end = (
+            end_date
+            + timedelta(
+                days=1
+            )
         )
 
-        warmup_start = start_date - timedelta(
-            days=450,
+        warmup_start = (
+            start_date
+            - timedelta(
+                days=450
+            )
         )
 
         with st.spinner(
@@ -1779,17 +2437,28 @@ with tab2:
 
             if market_minutes.empty:
 
-                spy = pd.DataFrame()
-                qqq = pd.DataFrame()
+                spy = (
+                    pd.DataFrame()
+                )
+
+                qqq = (
+                    pd.DataFrame()
+                )
 
             else:
 
                 spy = market_minutes[
-                    market_minutes["symbol"] == "SPY"
+                    market_minutes[
+                        "symbol"
+                    ]
+                    == "SPY"
                 ].copy()
 
                 qqq = market_minutes[
-                    market_minutes["symbol"] == "QQQ"
+                    market_minutes[
+                        "symbol"
+                    ]
+                    == "QQQ"
                 ].copy()
 
         if (
@@ -1803,7 +2472,9 @@ with tab2:
                 "QQQ",
             }.issubset(
                 set(
-                    market_daily["symbol"]
+                    market_daily[
+                        "symbol"
+                    ]
                 )
             )
         ):
@@ -1818,16 +2489,24 @@ with tab2:
 
             complete_symbols = sorted(
                 set(
-                    bars["symbol"]
+                    bars[
+                        "symbol"
+                    ]
                 )
                 & set(
-                    daily_history["symbol"]
+                    daily_history[
+                        "symbol"
+                    ]
                 )
             )
 
             missing_symbols = sorted(
-                set(syms)
-                - set(complete_symbols)
+                set(
+                    syms
+                )
+                - set(
+                    complete_symbols
+                )
             )
 
             if missing_symbols:
@@ -1839,25 +2518,34 @@ with tab2:
                     )
                 )
 
-            if len(complete_symbols) < 5:
+            if len(
+                complete_symbols
+            ) < 5:
 
                 st.error(
                     "Fewer than 5 symbols returned complete data. "
                     "Choose a shorter date range or a different feed."
                 )
+
                 st.stop()
 
             bars = bars[
-                bars["symbol"].isin(
+                bars[
+                    "symbol"
+                ].isin(
                     complete_symbols
                 )
             ].copy()
 
-            daily_history = daily_history[
-                daily_history["symbol"].isin(
-                    complete_symbols
-                )
-            ].copy()
+            daily_history = (
+                daily_history[
+                    daily_history[
+                        "symbol"
+                    ].isin(
+                        complete_symbols
+                    )
+                ].copy()
+            )
 
             res = swing_backtest(
                 bars,
@@ -1874,7 +2562,34 @@ with tab2:
                 commission_bps=commission_bps,
             )
 
-            stats = res["stats"]
+            st.session_state.latest_backtest_result = (
+                res
+            )
+
+            st.session_state.latest_backtest_settings = {
+                "symbols": (
+                    ",".join(
+                        complete_symbols
+                    )
+                ),
+                "start": str(
+                    start_date
+                ),
+                "end": str(
+                    end_date
+                ),
+                "risk_pct": risk_pct,
+                "max_positions": max_positions,
+                "max_holding_days": max_holding_days,
+                "scan_time": scan_time,
+                "slippage_bps": slippage_bps,
+                "commission_bps": commission_bps,
+                "feed": btfeed,
+            }
+
+            stats = res[
+                "stats"
+            ]
 
             cols = st.columns(
                 4
@@ -1899,9 +2614,12 @@ with tab2:
                 ),
             ]
 
-            for col, (
-                key,
-                label,
+            for (
+                col,
+                (
+                    key,
+                    label,
+                ),
             ) in zip(
                 cols,
                 labels,
@@ -1938,9 +2656,12 @@ with tab2:
                 ),
             ]
 
-            for col, (
-                key,
-                label,
+            for (
+                col,
+                (
+                    key,
+                    label,
+                ),
             ) in zip(
                 cols2,
                 labels2,
@@ -2019,10 +2740,15 @@ with tab2:
 
             if not gate_failures.empty:
 
-                primary = gate_failures.iloc[0]
+                primary = (
+                    gate_failures.iloc[
+                        0
+                    ]
+                )
 
                 st.info(
-                    f"Most frequently failed gate: {primary['gate']} failed for "
+                    f"Most frequently failed gate: "
+                    f"{primary['gate']} failed for "
                     f"{int(primary['failed'])} candidates "
                     f"({float(primary['failure_percent']):.1f}%)."
                 )
@@ -2032,7 +2758,9 @@ with tab2:
                 )
 
                 st.dataframe(
-                    gate_failures.head(8),
+                    gate_failures.head(
+                        8
+                    ),
                     width="stretch",
                     hide_index=True,
                 )
@@ -2054,7 +2782,12 @@ with tab2:
 
             else:
 
-                for _, near_miss in near_misses.head(5).iterrows():
+                for (
+                    _,
+                    near_miss,
+                ) in near_misses.head(
+                    5
+                ).iterrows():
 
                     with st.container(
                         border=True
@@ -2066,12 +2799,15 @@ with tab2:
                         )
 
                         st.write(
-                            f"Session: {near_miss['session']} • "
-                            f"Gates passed: {near_miss['gates_passed']}"
+                            f"Session: "
+                            f"{near_miss['session']} • "
+                            f"Gates passed: "
+                            f"{near_miss['gates_passed']}"
                         )
 
                         st.write(
-                            f"Swing Score: {float(near_miss['swing_score']):.1f} • "
+                            f"Swing Score: "
+                            f"{float(near_miss['swing_score']):.1f} • "
                             f"Intraday Score: "
                             f"{float(near_miss['intraday_score']):.1f} • "
                             f"Entry Quality: "
@@ -2093,11 +2829,15 @@ with tab2:
                         hide_index=True,
                     )
 
-            if not res["equity"].empty:
+            if not res[
+                "equity"
+            ].empty:
 
                 st.plotly_chart(
                     px.line(
-                        res["equity"],
+                        res[
+                            "equity"
+                        ],
                         x="date",
                         y="equity",
                         title="$2,000 Equity Curve",
@@ -2110,21 +2850,33 @@ with tab2:
             )
 
             st.dataframe(
-                res["trades"],
+                res[
+                    "trades"
+                ],
                 width="stretch",
                 hide_index=True,
             )
 
-            if not res["trades"].empty:
+            if not res[
+                "trades"
+            ].empty:
 
                 st.download_button(
                     "Download simulated trades",
-                    data=res["trades"].to_csv(
-                        index=False
-                    ).encode(
-                        "utf-8"
+                    data=(
+                        res[
+                            "trades"
+                        ]
+                        .to_csv(
+                            index=False
+                        )
+                        .encode(
+                            "utf-8"
+                        )
                     ),
-                    file_name="v3_2_1_swing_backtest_trades.csv",
+                    file_name=(
+                        "v3_3_swing_backtest_trades.csv"
+                    ),
                     mime="text/csv",
                     width="stretch",
                 )
@@ -2140,24 +2892,451 @@ with tab2:
                 )
 
                 st.dataframe(
-                    res["signal_log"],
+                    res[
+                        "signal_log"
+                    ],
                     width="stretch",
                     hide_index=True,
                 )
 
-                if not res["signal_log"].empty:
+                if not res[
+                    "signal_log"
+                ].empty:
 
                     st.download_button(
                         "Download signal audit",
-                        data=res["signal_log"].to_csv(
-                            index=False
-                        ).encode(
-                            "utf-8"
+                        data=(
+                            res[
+                                "signal_log"
+                            ]
+                            .to_csv(
+                                index=False
+                            )
+                            .encode(
+                                "utf-8"
+                            )
                         ),
-                        file_name="v3_2_1_signal_audit.csv",
+                        file_name=(
+                            "v3_3_signal_audit.csv"
+                        ),
                         mime="text/csv",
                         width="stretch",
                     )
+
+
+# ============================================================
+# CALIBRATION & VALIDATION TAB
+# ============================================================
+
+with tab3:
+
+    st.subheader(
+        "Strategy Calibration & Validation"
+    )
+
+    st.info(
+        "This section is designed to stop us from guessing which settings "
+        "are best. It evaluates the most recent completed backtest and "
+        "separates historical fit from later out-of-sample performance."
+    )
+
+    st.warning(
+        "Do not lower the live BUY thresholds simply because a lower "
+        "threshold produces more candidates. More trades are not necessarily "
+        "better trades."
+    )
+
+    result = (
+        st.session_state.latest_backtest_result
+    )
+
+    settings = (
+        st.session_state.latest_backtest_settings
+    )
+
+    if result is None:
+
+        st.warning(
+            "Run a backtest first in the '$2,000 Swing Backtester' tab. "
+            "The results will automatically appear here."
+        )
+
+    else:
+
+        trades = result.get(
+            "trades",
+            pd.DataFrame(),
+        )
+
+        signal_log = result.get(
+            "signal_log",
+            pd.DataFrame(),
+        )
+
+        if settings:
+
+            with st.expander(
+                "Backtest used for this validation"
+            ):
+
+                st.json(
+                    settings
+                )
+
+        st.header(
+            "1. Chronological Out-of-Sample Validation"
+        )
+
+        st.caption(
+            "The oldest 70% of completed trades are treated as the "
+            "in-sample period. The newest 30% are treated as unseen "
+            "out-of-sample data."
+        )
+
+        validation = (
+            chronological_validation(
+                trades,
+                train_fraction=0.70,
+                min_total_trades=30,
+                min_oos_trades=10,
+            )
+        )
+
+        v1, v2, v3 = st.columns(
+            3
+        )
+
+        v1.metric(
+            "Confidence Grade",
+            validation.get(
+                "confidence_grade",
+                "INSUFFICIENT",
+            ),
+        )
+
+        v2.metric(
+            "Total Trades",
+            validation.get(
+                "sample_trades",
+                0,
+            ),
+        )
+
+        v3.metric(
+            "Out-of-Sample Trades",
+            validation.get(
+                "out_of_sample_trades",
+                0,
+            ),
+        )
+
+        v4, v5 = st.columns(
+            2
+        )
+
+        v4.metric(
+            "In-Sample Win Rate",
+            pct_display(
+                validation.get(
+                    "in_sample_win_rate_pct",
+                    0,
+                )
+            ),
+        )
+
+        v5.metric(
+            "Out-of-Sample Win Rate",
+            pct_display(
+                validation.get(
+                    "out_of_sample_win_rate_pct",
+                    0,
+                )
+            ),
+        )
+
+        v6, v7 = st.columns(
+            2
+        )
+
+        v6.metric(
+            "In-Sample Expectancy",
+            f"{safe_float(validation.get('in_sample_expectancy_r')):.3f} R",
+        )
+
+        v7.metric(
+            "Out-of-Sample Expectancy",
+            f"{safe_float(validation.get('out_of_sample_expectancy_r')):.3f} R",
+        )
+
+        v8, v9 = st.columns(
+            2
+        )
+
+        v8.metric(
+            "OOS Profit Factor",
+            validation.get(
+                "out_of_sample_profit_factor",
+                0,
+            ),
+        )
+
+        ci_low = validation.get(
+            "bootstrap_expectancy_low_r"
+        )
+
+        ci_high = validation.get(
+            "bootstrap_expectancy_high_r"
+        )
+
+        if (
+            ci_low is None
+            or ci_high is None
+        ):
+
+            ci_text = (
+                "Not enough trades"
+            )
+
+        else:
+
+            ci_text = (
+                f"{ci_low:.3f} to "
+                f"{ci_high:.3f} R"
+            )
+
+        v9.metric(
+            "95% Expectancy Range",
+            ci_text,
+        )
+
+        if validation.get(
+            "validation_pass",
+            False,
+        ):
+
+            st.success(
+                "VALIDATION PASS — the configured strategy passed the "
+                "current chronological holdout and bootstrap requirements."
+            )
+
+        else:
+
+            st.error(
+                "VALIDATION NOT YET PASSED — do not interpret the backtest "
+                "as proof that the strategy has a durable edge."
+            )
+
+        notes = validation.get(
+            "notes",
+            [],
+        )
+
+        for note in notes:
+
+            st.write(
+                f"• {note}"
+            )
+
+        st.divider()
+
+        st.header(
+            "2. Threshold Sensitivity"
+        )
+
+        st.caption(
+            "This compares how selective different Swing Score, Intraday "
+            "Score and Entry Quality combinations would be on the historical "
+            "signal observations."
+        )
+
+        st.warning(
+            "This table measures candidate frequency only. It does NOT yet "
+            "claim that a lower threshold is more profitable. A true "
+            "profitability comparison requires rerunning the simulator under "
+            "each threshold combination."
+        )
+
+        sensitivity = calibration_summary(
+            signal_log
+        )
+
+        if sensitivity.empty:
+
+            st.info(
+                "There is not enough signal-audit data to build the "
+                "threshold sensitivity table."
+            )
+
+        else:
+
+            production_row = sensitivity[
+                (
+                    sensitivity[
+                        "Swing threshold"
+                    ]
+                    == 85.0
+                )
+                & (
+                    sensitivity[
+                        "Intraday threshold"
+                    ]
+                    == 85.0
+                )
+                & (
+                    sensitivity[
+                        "Entry quality"
+                    ]
+                    == 10.0
+                )
+            ]
+
+            if not production_row.empty:
+
+                production_candidates = int(
+                    production_row.iloc[
+                        0
+                    ][
+                        "Historical candidates"
+                    ]
+                )
+
+                st.metric(
+                    "Production-rule candidates",
+                    production_candidates,
+                )
+
+            st.dataframe(
+                sensitivity,
+                width="stretch",
+                hide_index=True,
+            )
+
+            st.download_button(
+                "Download threshold sensitivity",
+                data=(
+                    sensitivity
+                    .to_csv(
+                        index=False
+                    )
+                    .encode(
+                        "utf-8"
+                    )
+                ),
+                file_name=(
+                    "v3_3_threshold_sensitivity.csv"
+                ),
+                mime="text/csv",
+                width="stretch",
+            )
+
+        st.divider()
+
+        st.header(
+            "3. Strategy Decision"
+        )
+
+        total_trades = validation.get(
+            "sample_trades",
+            0,
+        )
+
+        oos_trades = validation.get(
+            "out_of_sample_trades",
+            0,
+        )
+
+        oos_expectancy = safe_float(
+            validation.get(
+                "out_of_sample_expectancy_r",
+                0,
+            )
+        )
+
+        grade = validation.get(
+            "confidence_grade",
+            "INSUFFICIENT",
+        )
+
+        if (
+            validation.get(
+                "validation_pass",
+                False,
+            )
+            and grade
+            in [
+                "A",
+                "B",
+            ]
+        ):
+
+            st.success(
+                "KEEP CURRENT PRODUCTION RULES. "
+                "The strategy has enough evidence to justify continued "
+                "paper testing without loosening the BUY gates."
+            )
+
+        elif (
+            total_trades
+            < 30
+            or oos_trades
+            < 10
+        ):
+
+            st.warning(
+                "COLLECT MORE DATA. The strategy does not yet have enough "
+                "completed trades for a dependable statistical conclusion. "
+                "Do not loosen the BUY rules merely to force more trades."
+            )
+
+        elif (
+            oos_expectancy
+            <= 0
+        ):
+
+            st.error(
+                "RESEARCH REQUIRED. Out-of-sample expectancy is not positive. "
+                "Do not move this strategy toward automated real-money trading."
+            )
+
+        else:
+
+            st.warning(
+                "PROMISING BUT NOT PROVEN. Continue out-of-sample testing "
+                "and paper trading before changing production thresholds."
+            )
+
+        st.divider()
+
+        st.header(
+            "What this version tells us"
+        )
+
+        st.write(
+            "The live scanner answers: **Is there a valid BUY right now?**"
+        )
+
+        st.write(
+            "The production backtester answers: **Would these exact rules "
+            "have produced trades historically?**"
+        )
+
+        st.write(
+            "The validation engine answers: **Did the strategy continue "
+            "working on later data that was not part of the initial sample?**"
+        )
+
+        st.write(
+            "The threshold sensitivity table answers: **How restrictive "
+            "are alternative score thresholds?**"
+        )
+
+        st.info(
+            "The next major upgrade, after we verify this screen works, "
+            "is true multi-threshold portfolio calibration. That will rerun "
+            "the actual trading simulator under each rule combination and "
+            "compare out-of-sample expectancy, profit factor, drawdown and "
+            "trade count instead of merely comparing candidate frequency."
+        )
 
 
 # ============================================================
@@ -2167,7 +3346,7 @@ with tab2:
 st.divider()
 
 st.warning(
-    "Research only. Scanner signals and simulated results do not "
-    "guarantee future performance. Validate the strategy with "
-    "out-of-sample testing and paper trading before risking real capital."
+    "Research only. Scanner signals, calibration results and simulated "
+    "performance do not guarantee future returns. Use out-of-sample testing "
+    "and paper trading before risking real capital."
 )
