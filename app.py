@@ -13,7 +13,7 @@ from alerts import (
     send_sms,
     sms_configured,
 )
-from backtest import swing_backtest, calibrate_thresholds_adaptive
+from backtest import swing_backtest
 from calibration_ui import render_calibration_lab
 from market_data import (
     eligible_us_equity_universe,
@@ -38,11 +38,11 @@ load_dotenv()
 ET = ZoneInfo("America/New_York")
 
 st.set_page_config(
-    page_title="Institutional Swing Scanner v3.4.1",
+    page_title="Institutional Swing Scanner v3.4.2",
     layout="wide",
 )
 
-st.title("Institutional Swing Scanner v3.4.1")
+st.title("Institutional Swing Scanner v3.4.2")
 st.caption(
     "Full U.S. market  |  catalyst-gap protection  |  daily + intraday confirmation  |  "
     "SMS alerts  |  production-equivalent backtesting  |  adaptive walk-forward calibration  |  "
@@ -67,9 +67,6 @@ if "latest_backtest_result" not in st.session_state:
 
 if "latest_backtest_settings" not in st.session_state:
     st.session_state.latest_backtest_settings = None
-
-if "latest_backtest_data" not in st.session_state:
-    st.session_state.latest_backtest_data = None
 
 
 # ============================================================
@@ -105,12 +102,12 @@ def rr_display(value):
 
 def signal_icon(signal):
     if signal in {"A+ SWING BUY", "BUY"}:
-        return "[BUY]"
+        return "ð¢"
     if signal == "WATCH":
-        return "[WATCH]"
+        return "ð¡"
     if signal == "TOO EXTENDED":
-        return "[EXTENDED]"
-    return "[INFO]"
+        return "ð´"
+    return "âª"
 
 
 def action_text(signal):
@@ -322,7 +319,7 @@ with tab1:
     st.info(
         "A strong stock is not automatically a BUY. Production rules retain the "
         "85 Swing Score and 85 Intraday Score gates plus catalyst, trend, leadership, "
-        "entry-zone and risk/reward protections. v3.4.1 calibration is research-only."
+        "entry-zone and risk/reward protections. v3.4.2 calibration is research-only."
     )
 
     c1, c2 = st.columns(2)
@@ -782,12 +779,12 @@ with tab1:
 
                 if not buys.empty:
                     st.success(
-                        f"BUY {len(buys)} CONFIRMED SWING BUY "
+                        f"ð¢ {len(buys)} CONFIRMED SWING BUY "
                         f"{'SIGNAL' if len(buys) == 1 else 'SIGNALS'}"
                     )
                     st.write(", ".join(buys["symbol"].head(8)))
                 else:
-                    st.error("NO BUY NO CONFIRMED SWING BUY RIGHT NOW")
+                    st.error("ð´ NO CONFIRMED SWING BUY RIGHT NOW")
                     st.caption(
                         "Do not buy simply because a stock has a high Swing Score. "
                         "Wait until the scanner changes the signal to BUY or A+ SWING BUY."
@@ -812,7 +809,7 @@ with tab1:
                     render_trade_card(row, rank_num)
 
                 st.divider()
-                st.header("BUY Confirmed BUY Signals")
+                st.header("ð¢ Confirmed BUY Signals")
                 if buys.empty:
                     st.info("No confirmed BUY signals right now.")
                 else:
@@ -820,7 +817,7 @@ with tab1:
                         render_trade_card(row)
 
                 st.divider()
-                st.header("NO BUY Strong But Too Extended")
+                st.header("ð´ Strong But Too Extended")
                 if extended.empty:
                     st.write("None.")
                 else:
@@ -828,7 +825,7 @@ with tab1:
                         render_trade_card(row)
 
                 st.divider()
-                st.header("WATCH WATCH List")
+                st.header("ð¡ WATCH List")
                 if watches.empty:
                     st.write("None.")
                 else:
@@ -943,7 +940,7 @@ with tab2:
     st.info(
         "The production run uses the same daily score, market-regime rules, "
         "leadership gate, catalyst protection and intraday confirmation used by "
-        "the live scanner. v3.4.1 can then run bounded alternate threshold profiles "
+        "the live scanner. v3.4.2 can then run bounded alternate threshold profiles "
         "through the actual portfolio simulator for research only."
     )
 
@@ -1054,24 +1051,10 @@ with tab2:
 
     st.divider()
 
-    run_v34_calibration = st.checkbox(
-        "Also run v3.4.1 adaptive calibration now",
-        value=False,
-        help=(
-            "Optional. The faster and safer workflow is to run the production backtest first, "
-            "then use the separate calibration button below. Live rules never change automatically."
-        ),
-        key="v34_calibration_enabled",
-    )
-
-    calibration_profiles = st.slider(
-        "Maximum calibration profiles",
-        6,
-        16,
-        10,
-        1,
-        key="v34_calibration_profiles",
-        help="More profiles = broader research but longer runtime.",
+    st.info(
+        "v3.4.2 runs the production backtest by itself first. Adaptive calibration "
+        "is handled separately in the Calibration & Validation tab using the completed "
+        "candidate log, so the backtest is not forced to repeat expensive work."
     )
 
     if st.button("RUN $2,000 BACKTEST", type="primary", width="stretch"):
@@ -1211,44 +1194,7 @@ with tab2:
                     commission_bps=commission_bps,
                 )
 
-            if run_v34_calibration:
-                with st.spinner(
-                    "Running v3.4 adaptive threshold calibration using the same "
-                    "historical data..."
-                ):
-                    calibration_result = calibrate_thresholds_adaptive(
-                        bars,
-                        spy,
-                        qqq_bars=qqq,
-                        daily_bars=daily_history,
-                        market_daily_bars=market_daily,
-                        starting_capital=2000,
-                        risk_pct=risk_pct,
-                        max_positions=max_positions,
-                        max_holding_days=max_holding_days,
-                        scan_time=scan_time,
-                        slippage_bps=slippage_bps,
-                        commission_bps=commission_bps,
-                        production_result=res,
-                        max_profiles=calibration_profiles,
-                    )
-                    res["calibration_result"] = calibration_result
-
             st.session_state.latest_backtest_result = res
-            st.session_state.latest_backtest_data = {
-                "bars": bars,
-                "spy": spy,
-                "qqq": qqq,
-                "daily_history": daily_history,
-                "market_daily": market_daily,
-                "starting_capital": 2000,
-                "risk_pct": risk_pct,
-                "max_positions": max_positions,
-                "max_holding_days": max_holding_days,
-                "scan_time": scan_time,
-                "slippage_bps": slippage_bps,
-                "commission_bps": commission_bps,
-            }
             st.session_state.latest_backtest_settings = {
                 "symbols": ",".join(complete_symbols),
                 "start": str(start_date),
@@ -1260,8 +1206,7 @@ with tab2:
                 "slippage_bps": slippage_bps,
                 "commission_bps": commission_bps,
                 "feed": btfeed,
-                "v3_4_calibration": run_v34_calibration,
-                "calibration_profiles": calibration_profiles,
+                "v3_4_2_calibration": "separate_calibration_tab",
             }
 
             stats = res.get("stats", {})
@@ -1290,7 +1235,7 @@ with tab2:
             if stats.get("trades", 0) == 0:
                 st.info(
                     "The production 85/85 rules produced no completed trades in "
-                    "this sample. v3.4.1 calibration can still test bounded research "
+                    "this sample. v3.4.2 calibration can still test bounded research "
                     "profiles without changing the live scanner."
                 )
 
@@ -1420,143 +1365,20 @@ with tab2:
                         width="stretch",
                     )
 
-            if run_v34_calibration and res.get("calibration_result"):
-                cal = res["calibration_result"]
-                comparison = cal.get("comparison", pd.DataFrame())
 
-                st.divider()
-                st.subheader("v3.4.1 Calibration Snapshot")
-
-                if comparison.empty:
-                    st.info("Calibration completed but returned no comparison rows.")
-                else:
-                    display_cols = [
-                        c
-                        for c in [
-                            "profile",
-                            "production_rules",
-                            "swing_score_gate",
-                            "intraday_score_gate",
-                            "entry_quality_gate",
-                            "leadership_gate",
-                            "trades",
-                            "win_rate_pct",
-                            "expectancy_r",
-                            "profit_factor",
-                            "return_pct",
-                            "max_drawdown_pct",
-                            "out_of_sample_trades",
-                            "out_of_sample_win_rate_pct",
-                            "out_of_sample_expectancy_r",
-                            "out_of_sample_profit_factor",
-                            "bootstrap_expectancy_low_r",
-                            "confidence_grade",
-                            "validation_pass",
-                            "research_eligible",
-                            "promotion_candidate",
-                            "research_score",
-                        ]
-                        if c in comparison.columns
-                    ]
-
-                    st.dataframe(
-                        comparison[display_cols],
-                        width="stretch",
-                        hide_index=True,
-                    )
-
-                    if (
-                        "promotion_candidate" in comparison.columns
-                        and comparison["promotion_candidate"].fillna(False).any()
-                    ):
-                        st.warning(
-                            "One or more research profiles met the v3.4 review "
-                            "guardrails. This means REVIEW  -  not automatically "
-                            "change the live scanner."
-                        )
-                    else:
-                        st.info(
-                            "No alternate profile qualified for promotion review. "
-                            "Keep the live production rules unchanged."
-                        )
-
-
-
-
-# ------------------------------------------------------------
-# FAST SEPARATE CALIBRATION RUN (v3.4.1)
-# ------------------------------------------------------------
-
-with tab2:
-    if st.session_state.latest_backtest_result is not None:
-        st.divider()
-        st.subheader("v3.4.1 Fast Adaptive Calibration")
-        st.caption(
-            "Recommended workflow: run the production backtest first, then run calibration "
-            "here. The historical candidate log is reused, so the expensive scoring pass "
-            "is not repeated for every profile."
-        )
-
-        cached = st.session_state.latest_backtest_data
-        if cached is None:
-            st.info(
-                "Run the production backtest once in this browser session to prepare the "
-                "cached calibration dataset."
-            )
-        else:
-            quick_profiles = st.slider(
-                "Calibration profiles for separate run",
-                6,
-                16,
-                10,
-                1,
-                key="v341_separate_profiles",
-                help="Start with 10. The v3.4.1 replay engine is much faster than v3.4.",
-            )
-            if st.button(
-                "RUN FAST ADAPTIVE CALIBRATION",
-                type="secondary",
-                width="stretch",
-                key="v341_fast_calibration_button",
-            ):
-                with st.spinner(
-                    "Replaying the cached candidate log through bounded research profiles..."
-                ):
-                    cal = calibrate_thresholds_adaptive(
-                        cached["bars"],
-                        cached["spy"],
-                        qqq_bars=cached["qqq"],
-                        daily_bars=cached["daily_history"],
-                        market_daily_bars=cached["market_daily"],
-                        starting_capital=cached["starting_capital"],
-                        risk_pct=cached["risk_pct"],
-                        max_positions=cached["max_positions"],
-                        max_holding_days=cached["max_holding_days"],
-                        scan_time=cached["scan_time"],
-                        slippage_bps=cached["slippage_bps"],
-                        commission_bps=cached["commission_bps"],
-                        production_result=st.session_state.latest_backtest_result,
-                        max_profiles=quick_profiles,
-                    )
-                    st.session_state.latest_backtest_result["calibration_result"] = cal
-                    if st.session_state.latest_backtest_settings is not None:
-                        st.session_state.latest_backtest_settings["v3_4_1_calibration"] = True
-                        st.session_state.latest_backtest_settings["calibration_profiles"] = quick_profiles
-                st.success(
-                    "Fast calibration completed. Open the Calibration & Validation tab to review it."
-                )
 
 # ============================================================
 # CALIBRATION & VALIDATION TAB
 # ============================================================
 
 with tab3:
-    st.subheader("v3.4.1 Calibration & Walk-Forward Validation")
+    st.subheader("v3.4.2 Calibration & Walk-Forward Validation")
 
     st.info(
-        "This research lab compares production rules with bounded alternate "
-        "threshold profiles using the actual portfolio simulator. The live "
-        "scanner remains unchanged unless you deliberately update it later."
+        "This research lab uses the completed production backtest candidate log for "
+        "fast calibration and walk-forward research. It is intentionally separate from "
+        "the production backtest so calibration cannot make the backtest time out. "
+        "The live scanner remains unchanged unless you deliberately update it later."
     )
 
     result = st.session_state.latest_backtest_result
@@ -1583,7 +1405,7 @@ st.divider()
 
 st.warning(
     "Research only. Scanner signals, calibration results and simulated performance "
-    "do not guarantee future returns. v3.4.1 does not automatically change production "
+    "do not guarantee future returns. v3.4.2 does not automatically change production "
     "BUY rules. Repeat promising results across non-overlapping periods, a broader "
     "historical universe and paper trading before risking real capital."
 )
