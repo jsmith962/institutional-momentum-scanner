@@ -1,4 +1,4 @@
-"""v3.4 calibration analytics for Institutional Swing Scanner.
+"""v3.4.1 calibration analytics for Institutional Swing Scanner.
 
 Research only. Nothing in this module changes live production thresholds.
 """
@@ -134,7 +134,7 @@ def calibration_summary(signal_log: pd.DataFrame, current_swing_threshold=85, cu
 def promotion_summary(calibration_result: dict | None) -> dict:
     """Summarize actual simulator calibration; never auto-promotes live rules."""
     if not calibration_result:
-        return {"status": "NOT_RUN", "message": "Run v3.4 adaptive simulator calibration first."}
+        return {"status": "NOT_RUN", "message": "Run v3.4.1 adaptive simulator calibration first."}
     comp = calibration_result.get("comparison", pd.DataFrame())
     if comp is None or comp.empty:
         return {"status": "NO_RESULTS", "message": "No calibration comparison is available."}
