@@ -38,14 +38,14 @@ load_dotenv()
 ET = ZoneInfo("America/New_York")
 
 st.set_page_config(
-    page_title="Institutional Swing Scanner v3.4",
+    page_title="Institutional Swing Scanner v3.4.1",
     layout="wide",
 )
 
-st.title("Institutional Swing Scanner v3.4")
+st.title("Institutional Swing Scanner v3.4.1")
 st.caption(
-    "Full U.S. market â¢ catalyst-gap protection â¢ daily + intraday confirmation â¢ "
-    "SMS alerts â¢ production-equivalent backtesting â¢ adaptive walk-forward calibration â¢ "
+    "Full U.S. market  |  catalyst-gap protection  |  daily + intraday confirmation  |  "
+    "SMS alerts  |  production-equivalent backtesting  |  adaptive walk-forward calibration  |  "
     "no live orders"
 )
 
@@ -67,6 +67,9 @@ if "latest_backtest_result" not in st.session_state:
 
 if "latest_backtest_settings" not in st.session_state:
     st.session_state.latest_backtest_settings = None
+
+if "latest_backtest_data" not in st.session_state:
+    st.session_state.latest_backtest_data = None
 
 
 # ============================================================
@@ -102,18 +105,18 @@ def rr_display(value):
 
 def signal_icon(signal):
     if signal in {"A+ SWING BUY", "BUY"}:
-        return "ð¢"
+        return "[BUY]"
     if signal == "WATCH":
-        return "ð¡"
+        return "[WATCH]"
     if signal == "TOO EXTENDED":
-        return "ð´"
-    return "âª"
+        return "[EXTENDED]"
+    return "[INFO]"
 
 
 def action_text(signal):
     return {
-        "A+ SWING BUY": "BUY â top-tier setup confirmed",
-        "BUY": "BUY â entry rules confirmed",
+        "A+ SWING BUY": "BUY  -  top-tier setup confirmed",
+        "BUY": "BUY  -  entry rules confirmed",
         "WATCH": "WAIT FOR BUY TRIGGER",
         "TOO EXTENDED": "WAIT FOR PULLBACK / RETEST",
         "AVOID": "PASS",
@@ -200,7 +203,7 @@ def why_not_buy(row):
             "confirmation has not yet passed the BUY requirement"
         )
 
-    return " â¢ ".join(failures) if failures else "Waiting for additional confirmation."
+    return "  |  ".join(failures) if failures else "Waiting for additional confirmation."
 
 
 def render_trade_card(row, rank_num=None):
@@ -209,7 +212,7 @@ def render_trade_card(row, rank_num=None):
     prefix = f"#{rank_num} " if rank_num is not None else ""
 
     with st.container(border=True):
-        st.markdown(f"### {prefix}{signal_icon(signal)} {symbol} â {signal}")
+        st.markdown(f"### {prefix}{signal_icon(signal)} {symbol}  -  {signal}")
         st.write(f"**Swing Score:** {score_display(row.get('swing_score'))}/100")
         st.write(f"**Setup:** {row.get('setup', '')}")
         st.write(f"**Current Price:** {money(row.get('price'))}")
@@ -232,13 +235,13 @@ def render_trade_card(row, rank_num=None):
             except Exception:
                 distribution = 0
             st.caption(
-                f"Risk gate: PASS â¢ Market leadership: {leadership_text} â¢ "
+                f"Risk gate: PASS  |  Market leadership: {leadership_text}  |  "
                 f"Distribution days: {distribution}"
             )
 
         st.markdown("#### Entry Plan")
         st.write(
-            f"**Preferred Entry Zone:** {money(row.get('entry_low'))} â "
+            f"**Preferred Entry Zone:** {money(row.get('entry_low'))} - "
             f"{money(row.get('entry_high'))}"
         )
         st.write(f"**Stop:** {money(row.get('stop'))}")
@@ -319,7 +322,7 @@ with tab1:
     st.info(
         "A strong stock is not automatically a BUY. Production rules retain the "
         "85 Swing Score and 85 Intraday Score gates plus catalyst, trend, leadership, "
-        "entry-zone and risk/reward protections. v3.4 calibration is research-only."
+        "entry-zone and risk/reward protections. v3.4.1 calibration is research-only."
     )
 
     c1, c2 = st.columns(2)
@@ -779,12 +782,12 @@ with tab1:
 
                 if not buys.empty:
                     st.success(
-                        f"ð¢ {len(buys)} CONFIRMED SWING BUY "
+                        f"BUY {len(buys)} CONFIRMED SWING BUY "
                         f"{'SIGNAL' if len(buys) == 1 else 'SIGNALS'}"
                     )
                     st.write(", ".join(buys["symbol"].head(8)))
                 else:
-                    st.error("ð´ NO CONFIRMED SWING BUY RIGHT NOW")
+                    st.error("NO BUY NO CONFIRMED SWING BUY RIGHT NOW")
                     st.caption(
                         "Do not buy simply because a stock has a high Swing Score. "
                         "Wait until the scanner changes the signal to BUY or A+ SWING BUY."
@@ -799,7 +802,7 @@ with tab1:
                 st.divider()
                 st.header("Top 5 Swing Opportunities")
                 st.caption(
-                    "These are ranked setups. WATCH means wait â it does not mean buy now."
+                    "These are ranked setups. WATCH means wait  -  it does not mean buy now."
                 )
 
                 for rank_num, (_, row) in enumerate(
@@ -809,7 +812,7 @@ with tab1:
                     render_trade_card(row, rank_num)
 
                 st.divider()
-                st.header("ð¢ Confirmed BUY Signals")
+                st.header("BUY Confirmed BUY Signals")
                 if buys.empty:
                     st.info("No confirmed BUY signals right now.")
                 else:
@@ -817,7 +820,7 @@ with tab1:
                         render_trade_card(row)
 
                 st.divider()
-                st.header("ð´ Strong But Too Extended")
+                st.header("NO BUY Strong But Too Extended")
                 if extended.empty:
                     st.write("None.")
                 else:
@@ -825,7 +828,7 @@ with tab1:
                         render_trade_card(row)
 
                 st.divider()
-                st.header("ð¡ WATCH List")
+                st.header("WATCH WATCH List")
                 if watches.empty:
                     st.write("None.")
                 else:
@@ -940,7 +943,7 @@ with tab2:
     st.info(
         "The production run uses the same daily score, market-regime rules, "
         "leadership gate, catalyst protection and intraday confirmation used by "
-        "the live scanner. v3.4 can then run bounded alternate threshold profiles "
+        "the live scanner. v3.4.1 can then run bounded alternate threshold profiles "
         "through the actual portfolio simulator for research only."
     )
 
@@ -1052,11 +1055,11 @@ with tab2:
     st.divider()
 
     run_v34_calibration = st.checkbox(
-        "Run v3.4 adaptive calibration after this backtest",
-        value=True,
+        "Also run v3.4.1 adaptive calibration now",
+        value=False,
         help=(
-            "Runs a bounded set of alternate score thresholds through the actual "
-            "portfolio simulator. This is slower and never changes live rules."
+            "Optional. The faster and safer workflow is to run the production backtest first, "
+            "then use the separate calibration button below. Live rules never change automatically."
         ),
         key="v34_calibration_enabled",
     )
@@ -1085,7 +1088,7 @@ with tab2:
         if (end_date - start_date).days > 365:
             st.warning(
                 "A range longer than one year can be slow or exceed the minute-data "
-                "limit. Start with 6â12 months, then test additional non-overlapping periods."
+                "limit. Start with 6-12 months, then test additional non-overlapping periods."
             )
 
         if len(syms) < 5:
@@ -1232,6 +1235,20 @@ with tab2:
                     res["calibration_result"] = calibration_result
 
             st.session_state.latest_backtest_result = res
+            st.session_state.latest_backtest_data = {
+                "bars": bars,
+                "spy": spy,
+                "qqq": qqq,
+                "daily_history": daily_history,
+                "market_daily": market_daily,
+                "starting_capital": 2000,
+                "risk_pct": risk_pct,
+                "max_positions": max_positions,
+                "max_holding_days": max_holding_days,
+                "scan_time": scan_time,
+                "slippage_bps": slippage_bps,
+                "commission_bps": commission_bps,
+            }
             st.session_state.latest_backtest_settings = {
                 "symbols": ",".join(complete_symbols),
                 "start": str(start_date),
@@ -1250,21 +1267,21 @@ with tab2:
             stats = res.get("stats", {})
 
             cols = st.columns(4)
-            cols[0].metric("Ending $", stats.get("ending_capital", "â"))
-            cols[1].metric("Return %", stats.get("total_return_pct", "â"))
-            cols[2].metric("Win rate %", stats.get("win_rate_pct", "â"))
-            cols[3].metric("Profit factor", stats.get("profit_factor", "â"))
+            cols[0].metric("Ending $", stats.get("ending_capital", " - "))
+            cols[1].metric("Return %", stats.get("total_return_pct", " - "))
+            cols[2].metric("Win rate %", stats.get("win_rate_pct", " - "))
+            cols[3].metric("Profit factor", stats.get("profit_factor", " - "))
 
             cols2 = st.columns(4)
-            cols2[0].metric("Max DD %", stats.get("max_drawdown_pct", "â"))
-            cols2[1].metric("Trades", stats.get("trades", "â"))
+            cols2[0].metric("Max DD %", stats.get("max_drawdown_pct", " - "))
+            cols2[1].metric("Trades", stats.get("trades", " - "))
             cols2[2].metric(
                 "Average expectancy (R)",
-                stats.get("expectancy_r", "â"),
+                stats.get("expectancy_r", " - "),
             )
             cols2[3].metric(
                 "Average trade $",
-                stats.get("avg_trade_dollars", "â"),
+                stats.get("avg_trade_dollars", " - "),
             )
 
             for warning in res.get("warnings", []):
@@ -1273,7 +1290,7 @@ with tab2:
             if stats.get("trades", 0) == 0:
                 st.info(
                     "The production 85/85 rules produced no completed trades in "
-                    "this sample. v3.4 calibration can still test bounded research "
+                    "this sample. v3.4.1 calibration can still test bounded research "
                     "profiles without changing the live scanner."
                 )
 
@@ -1330,15 +1347,15 @@ with tab2:
                 for _, near_miss in near_misses.head(5).iterrows():
                     with st.container(border=True):
                         st.markdown(
-                            f"**{near_miss['symbol']} â {near_miss['signal']}**"
+                            f"**{near_miss['symbol']}  -  {near_miss['signal']}**"
                         )
                         st.write(
-                            f"Session: {near_miss['session']} â¢ "
+                            f"Session: {near_miss['session']}  |  "
                             f"Gates passed: {near_miss['gates_passed']}"
                         )
                         st.write(
-                            f"Swing Score: {float(near_miss['swing_score']):.1f} â¢ "
-                            f"Intraday Score: {float(near_miss['intraday_score']):.1f} â¢ "
+                            f"Swing Score: {float(near_miss['swing_score']):.1f}  |  "
+                            f"Intraday Score: {float(near_miss['intraday_score']):.1f}  |  "
                             f"Entry Quality: {float(near_miss['entry_quality']):.1f}/15"
                         )
                         st.warning(
@@ -1408,7 +1425,7 @@ with tab2:
                 comparison = cal.get("comparison", pd.DataFrame())
 
                 st.divider()
-                st.subheader("v3.4 Calibration Snapshot")
+                st.subheader("v3.4.1 Calibration Snapshot")
 
                 if comparison.empty:
                     st.info("Calibration completed but returned no comparison rows.")
@@ -1454,7 +1471,7 @@ with tab2:
                     ):
                         st.warning(
                             "One or more research profiles met the v3.4 review "
-                            "guardrails. This means REVIEW â not automatically "
+                            "guardrails. This means REVIEW  -  not automatically "
                             "change the live scanner."
                         )
                     else:
@@ -1464,12 +1481,77 @@ with tab2:
                         )
 
 
+
+
+# ------------------------------------------------------------
+# FAST SEPARATE CALIBRATION RUN (v3.4.1)
+# ------------------------------------------------------------
+
+with tab2:
+    if st.session_state.latest_backtest_result is not None:
+        st.divider()
+        st.subheader("v3.4.1 Fast Adaptive Calibration")
+        st.caption(
+            "Recommended workflow: run the production backtest first, then run calibration "
+            "here. The historical candidate log is reused, so the expensive scoring pass "
+            "is not repeated for every profile."
+        )
+
+        cached = st.session_state.latest_backtest_data
+        if cached is None:
+            st.info(
+                "Run the production backtest once in this browser session to prepare the "
+                "cached calibration dataset."
+            )
+        else:
+            quick_profiles = st.slider(
+                "Calibration profiles for separate run",
+                6,
+                16,
+                10,
+                1,
+                key="v341_separate_profiles",
+                help="Start with 10. The v3.4.1 replay engine is much faster than v3.4.",
+            )
+            if st.button(
+                "RUN FAST ADAPTIVE CALIBRATION",
+                type="secondary",
+                width="stretch",
+                key="v341_fast_calibration_button",
+            ):
+                with st.spinner(
+                    "Replaying the cached candidate log through bounded research profiles..."
+                ):
+                    cal = calibrate_thresholds_adaptive(
+                        cached["bars"],
+                        cached["spy"],
+                        qqq_bars=cached["qqq"],
+                        daily_bars=cached["daily_history"],
+                        market_daily_bars=cached["market_daily"],
+                        starting_capital=cached["starting_capital"],
+                        risk_pct=cached["risk_pct"],
+                        max_positions=cached["max_positions"],
+                        max_holding_days=cached["max_holding_days"],
+                        scan_time=cached["scan_time"],
+                        slippage_bps=cached["slippage_bps"],
+                        commission_bps=cached["commission_bps"],
+                        production_result=st.session_state.latest_backtest_result,
+                        max_profiles=quick_profiles,
+                    )
+                    st.session_state.latest_backtest_result["calibration_result"] = cal
+                    if st.session_state.latest_backtest_settings is not None:
+                        st.session_state.latest_backtest_settings["v3_4_1_calibration"] = True
+                        st.session_state.latest_backtest_settings["calibration_profiles"] = quick_profiles
+                st.success(
+                    "Fast calibration completed. Open the Calibration & Validation tab to review it."
+                )
+
 # ============================================================
 # CALIBRATION & VALIDATION TAB
 # ============================================================
 
 with tab3:
-    st.subheader("v3.4 Calibration & Walk-Forward Validation")
+    st.subheader("v3.4.1 Calibration & Walk-Forward Validation")
 
     st.info(
         "This research lab compares production rules with bounded alternate "
@@ -1501,7 +1583,7 @@ st.divider()
 
 st.warning(
     "Research only. Scanner signals, calibration results and simulated performance "
-    "do not guarantee future returns. v3.4 does not automatically change production "
+    "do not guarantee future returns. v3.4.1 does not automatically change production "
     "BUY rules. Repeat promising results across non-overlapping periods, a broader "
     "historical universe and paper trading before risking real capital."
 )
