@@ -3690,6 +3690,292 @@ def calibrate_thresholds(
 
 backtest = swing_backtest
 
+
+# ============================================================
+# v3.4.1 FAST SIGNAL-REPLAY CALIBRATION
+# ============================================================
+
+def _signal_row_to_swing(row):
+    """Reconstruct the daily swing dictionary from a production signal-log row.
+
+    This lets calibration reuse the expensive production scoring pass instead of
+    recalculating daily/intraday features for every threshold profile.
+    """
+    return {
+        "signal": row.get("daily_signal", row.get("signal", "WATCH")),
+        "swing_score": _number(row.get("swing_score")),
+        "entry_quality": _number(row.get("entry_quality")),
+        "entry_low": _number(row.get("entry_low")),
+        "entry_high": _number(row.get("entry_high")),
+        "stop": _number(row.get("planned_stop")),
+        "reward_risk": _number(row.get("reward_risk")),
+        "market_score": _number(row.get("market_score")),
+        "leadership_percentile": row.get("leadership_percentile"),
+        "distribution_days": int(_number(row.get("distribution_days"))),
+        "trend_health": bool(row.get("trend_health", False)),
+        "inside_entry_zone": bool(row.get("inside_entry_zone", False)),
+        "too_extended": bool(row.get("too_extended", False)),
+        "risk_flag": bool(row.get("risk_flag", False)),
+        "risk_reason": str(row.get("risk_reason", "") or ""),
+        "setup": row.get("setup", ""),
+    }
+
+
+def replay_signal_log_backtest(
+    bars: pd.DataFrame,
+    production_signal_log: pd.DataFrame,
+    daily_bars: pd.DataFrame | None = None,
+    starting_capital: float = 2_000,
+    risk_pct: float = 0.005,
+    max_positions: int = 3,
+    max_holding_days: int = 20,
+    slippage_bps: float = 5.0,
+    commission_bps: float = 0.0,
+    gate_config=None,
+):
+    """Fast portfolio replay for calibration profiles.
+
+    The expensive feature construction and scoring are performed once by the
+    production backtest. Alternate research thresholds are then applied to that
+    immutable candidate log and passed through the same fill, sizing, stop,
+    target, time-exit, slippage and fee mechanics. This removes the main v3.4
+    timeout source without changing live production rules.
+    """
+    config = _normalise_gate_config(gate_config)
+    minutes = _regular_minutes(_normalise_bars(bars))
+    daily = (
+        _daily_from_minutes(minutes)
+        if daily_bars is None or daily_bars.empty
+        else _normalise_daily(daily_bars)
+    )
+    if minutes.empty or production_signal_log is None or production_signal_log.empty:
+        return _empty_result(
+            starting_capital,
+            ["No minute bars or production candidate log was available for replay."],
+            gate_config=config,
+        )
+
+    signals = production_signal_log.copy()
+    if "session" not in signals.columns:
+        return _empty_result(
+            starting_capital,
+            ["The production candidate log is missing its session column."],
+            gate_config=config,
+        )
+    signals["session"] = pd.to_datetime(signals["session"], errors="coerce").dt.date
+    signals = signals[signals["session"].notna()].copy()
+    if "signal_time" in signals.columns:
+        signals["signal_time"] = pd.to_datetime(signals["signal_time"], errors="coerce", utc=True)
+
+    cash = float(starting_capital)
+    positions = {}
+    pending = []
+    trades = []
+    replay_log = []
+    equity_rows = []
+    latest_prices = {}
+
+    session_dates = sorted(set(minutes["session"]))
+    by_session = {d: g.copy() for d, g in signals.groupby("session", sort=False)}
+
+    for session_date in session_dates:
+        all_today = minutes[minutes["session"] == session_date]
+        session_times = sorted(all_today["timestamp"].unique())
+        today_signals = by_session.get(session_date, pd.DataFrame())
+        evaluated = False
+        evaluation_time = None
+        if not today_signals.empty and "signal_time" in today_signals.columns:
+            valid_times = today_signals["signal_time"].dropna()
+            if not valid_times.empty:
+                evaluation_time = valid_times.min()
+
+        for raw_timestamp in session_times:
+            timestamp = pd.Timestamp(raw_timestamp)
+            current_rows = all_today[all_today["timestamp"] == timestamp]
+
+            for bar in current_rows.itertuples(index=False):
+                latest_prices[bar.symbol] = float(bar.close)
+                if bar.symbol in positions:
+                    cash, closed = _manage_bar(
+                        positions[bar.symbol], bar, cash, commission_bps, slippage_bps
+                    )
+                    if closed is not None:
+                        trades.append(closed)
+                        del positions[bar.symbol]
+
+            still_pending = []
+            for order in pending:
+                if order["signal_time"] >= timestamp or order["symbol"] in positions:
+                    still_pending.append(order)
+                    continue
+                match = current_rows[current_rows["symbol"] == order["symbol"]]
+                if match.empty or len(positions) >= max_positions:
+                    still_pending.append(order)
+                    continue
+                bar = match.iloc[0]
+                entry = _execution_price(float(bar["open"]), "buy", slippage_bps)
+                initial_stop = float(order["planned_stop"])
+                if initial_stop >= entry:
+                    initial_stop = entry - max(entry * 0.025, 0.01)
+                per_share_risk = entry - initial_stop
+                equity = _account_equity(cash, positions, latest_prices)
+                risk_budget = equity * risk_pct
+                shares_by_risk = int(risk_budget / max(per_share_risk, 0.01))
+                cost_per_share = entry * (1 + max(commission_bps, 0) / 10_000)
+                shares_by_cash = int(cash / max(cost_per_share, 0.01))
+                shares = min(shares_by_risk, shares_by_cash)
+                if shares < 1:
+                    continue
+                notional = shares * entry
+                entry_fee = _fee(notional, commission_bps)
+                cash -= notional + entry_fee
+                positions[order["symbol"]] = Position(
+                    symbol=order["symbol"],
+                    signal_date=order["session"],
+                    signal_time=order["signal_time"],
+                    entry_time=timestamp,
+                    signal=order["signal"],
+                    setup=order.get("setup", ""),
+                    swing_score=_number(order.get("swing_score")),
+                    intraday_score=_number(order.get("intraday_score")),
+                    entry=entry,
+                    initial_stop=initial_stop,
+                    stop=initial_stop,
+                    target1=entry + 2 * per_share_risk,
+                    target2=entry + 3 * per_share_risk,
+                    shares=shares,
+                    remaining=shares,
+                    entry_fee=entry_fee,
+                )
+                entry_bar = next(match.itertuples(index=False))
+                cash, closed = _manage_bar(
+                    positions[order["symbol"]], entry_bar, cash, commission_bps, slippage_bps
+                )
+                if closed is not None:
+                    trades.append(closed)
+                    del positions[order["symbol"]]
+            pending = still_pending
+
+            if not evaluated and not today_signals.empty and (evaluation_time is None or timestamp >= evaluation_time):
+                candidates = []
+                for _, source in today_signals.iterrows():
+                    row = source.to_dict()
+                    swing = _signal_row_to_swing(row)
+                    intra_signal = str(row.get("intraday_signal", "NO BUY"))
+                    intra_score = _number(row.get("intraday_score"))
+                    final_signal, decision, diagnostics = _research_signal(
+                        swing, intra_signal, intra_score, config
+                    )
+                    row.update(diagnostics)
+                    row["signal"] = final_signal
+                    row["decision"] = decision
+                    row["configured_swing_score"] = config["swing_score"]
+                    row["configured_intraday_score"] = config["intraday_score"]
+                    row["signal_time"] = timestamp
+                    row["planned_stop"] = _number(row.get("planned_stop", swing.get("stop")))
+                    replay_log.append(row.copy())
+                    candidates.append(row)
+                candidates.sort(
+                    key=lambda r: (
+                        r.get("signal") not in BUY_SIGNALS,
+                        -_number(r.get("swing_score")),
+                        -_number(r.get("intraday_score")),
+                    )
+                )
+                open_slots = max_positions - len(positions) - len(pending)
+                for candidate in candidates:
+                    if open_slots <= 0:
+                        break
+                    if (
+                        candidate.get("signal") in BUY_SIGNALS
+                        and candidate.get("symbol") not in positions
+                        and all(candidate.get("symbol") != o.get("symbol") for o in pending)
+                    ):
+                        pending.append(candidate)
+                        open_slots -= 1
+                evaluated = True
+
+        pending.clear()
+        final_rows = all_today[all_today["clock"] <= time(16, 0)]
+        for symbol in list(positions):
+            position = positions[symbol]
+            if position.holding_days < max_holding_days:
+                continue
+            match = final_rows[final_rows["symbol"] == symbol]
+            if match.empty:
+                continue
+            final_bar = match.iloc[-1]
+            cash, closed = _close_position(
+                position, float(final_bar["close"]), pd.Timestamp(final_bar["timestamp"]),
+                "TIME EXIT", cash, commission_bps, slippage_bps
+            )
+            trades.append(closed)
+            del positions[symbol]
+        _mark_trend_exits(positions, daily, final_rows, session_date)
+        equity_rows.append({
+            "date": session_date,
+            "equity": round(_account_equity(cash, positions, latest_prices), 2),
+            "cash": round(cash, 2),
+            "open_positions": len(positions),
+        })
+
+    final_timestamp = minutes["timestamp"].max()
+    for symbol in list(positions):
+        position = positions[symbol]
+        cash, closed = _close_position(
+            position, latest_prices.get(symbol, position.entry), final_timestamp,
+            "END OF TEST", cash, commission_bps, slippage_bps
+        )
+        trades.append(closed)
+        del positions[symbol]
+
+    trades_frame = pd.DataFrame(trades, columns=TRADE_COLUMNS)
+    equity_frame = pd.DataFrame(equity_rows)
+    if not equity_frame.empty:
+        equity_frame.loc[equity_frame.index[-1], ["equity", "cash", "open_positions"]] = [
+            round(cash, 2), round(cash, 2), 0
+        ]
+    trade_count = len(trades_frame)
+    wins = trades_frame[trades_frame["pnl"] > 0] if trade_count else trades_frame
+    losses = trades_frame[trades_frame["pnl"] < 0] if trade_count else trades_frame
+    gross_profit = float(wins["pnl"].sum()) if len(wins) else 0.0
+    gross_loss = abs(float(losses["pnl"].sum())) if len(losses) else 0.0
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else (np.inf if gross_profit > 0 else 0.0)
+    if not equity_frame.empty:
+        vals = pd.Series([float(starting_capital)] + equity_frame["equity"].astype(float).tolist())
+        peak = vals.cummax()
+        max_drawdown = float((vals / peak.replace(0, np.nan) - 1).min() * 100)
+    else:
+        max_drawdown = 0.0
+    stats = {
+        "starting_capital": round(float(starting_capital), 2),
+        "ending_capital": round(cash, 2),
+        "total_return_pct": round((cash / starting_capital - 1) * 100, 2),
+        "trades": trade_count,
+        "win_rate_pct": round(len(wins) / trade_count * 100, 2) if trade_count else 0.0,
+        "profit_factor": round(profit_factor, 2) if np.isfinite(profit_factor) else "inf",
+        "expectancy_r": round(float(trades_frame["r_multiple"].mean()), 3) if trade_count else 0.0,
+        "avg_trade_dollars": round(float(trades_frame["pnl"].mean()), 2) if trade_count else 0.0,
+        "max_drawdown_pct": round(max_drawdown, 2),
+    }
+    warnings = []
+    if trade_count < 30:
+        warnings.append("Fewer than 30 completed trades: the sample is too small for a reliable conclusion.")
+    replay_frame = pd.DataFrame(replay_log)
+    validation = chronological_validation(trades_frame)
+    return {
+        "trades": trades_frame,
+        "equity": equity_frame,
+        "stats": stats,
+        "signal_log": replay_frame,
+        "diagnostics": _build_signal_diagnostics(
+            replay_frame, trade_count=trade_count, gate_config=config
+        ),
+        "validation": validation,
+        "gate_config": config,
+        "warnings": warnings,
+    }
+
 # ============================================================
 # v3.4 ADAPTIVE WALK-FORWARD CALIBRATION
 # ============================================================
@@ -3701,56 +3987,75 @@ def _quantile_or_default(series, q, default):
     return float(s.quantile(q))
 
 
-def build_adaptive_calibration_profiles(production_result, max_profiles=16):
-    """Build a bounded, data-aware research grid without changing production rules.
+def build_adaptive_calibration_profiles(production_result, max_profiles=12):
+    """Build a small, bounded, reachable research grid.
 
-    Thresholds are anchored to reachable historical score percentiles, then clipped to
-    conservative floors. This avoids wasting calibration runs on impossible 85/85 gates
-    while also avoiding a brute-force search that would invite overfitting.
+    Production 85/85 remains present as the control. Research profiles are
+    anchored to observed percentiles and conservative floors, then de-duplicated.
     """
     signal_log = (production_result or {}).get("signal_log", pd.DataFrame())
     if signal_log is None or signal_log.empty:
         return CALIBRATION_PROFILES[:max_profiles]
 
-    swing = pd.to_numeric(signal_log.get("swing_score"), errors="coerce")
-    intra = pd.to_numeric(signal_log.get("intraday_score"), errors="coerce")
+    swing = pd.to_numeric(signal_log.get("swing_score"), errors="coerce").dropna()
+    intra = pd.to_numeric(signal_log.get("intraday_score"), errors="coerce").dropna()
 
-    swing_candidates = {
-        85.0,
-        round(_quantile_or_default(swing, .99, 82.5) * 2) / 2,
-        round(_quantile_or_default(swing, .95, 80.0) * 2) / 2,
-        round(_quantile_or_default(swing, .90, 77.5) * 2) / 2,
-        round(_quantile_or_default(swing, .80, 75.0) * 2) / 2,
-    }
-    intra_candidates = {
-        85.0,
-        round(_quantile_or_default(intra, .99, 80.0) / 5) * 5,
-        round(_quantile_or_default(intra, .95, 75.0) / 5) * 5,
-        round(_quantile_or_default(intra, .90, 70.0) / 5) * 5,
-    }
+    def half(x):
+        return round(float(x) * 2) / 2
 
-    # Research floors only. These are NOT live-rule changes.
-    swing_candidates = sorted({min(85.0, max(70.0, x)) for x in swing_candidates}, reverse=True)
-    intra_candidates = sorted({min(85.0, max(55.0, x)) for x in intra_candidates}, reverse=True)
+    def five(x):
+        return round(float(x) / 5) * 5
+
+    # Research bounds only. They do not modify live rules.
+    swing_levels = [85.0]
+    for q in (0.99, 0.975, 0.95, 0.90, 0.80):
+        if not swing.empty:
+            swing_levels.append(half(swing.quantile(q)))
+    swing_levels += [77.5, 75.0, 72.5, 70.0, 67.5, 65.0]
+    swing_levels = sorted({min(85.0, max(65.0, x)) for x in swing_levels}, reverse=True)
+
+    intra_levels = [85.0]
+    for q in (0.99, 0.975, 0.95, 0.90, 0.80):
+        if not intra.empty:
+            intra_levels.append(five(intra.quantile(q)))
+    intra_levels += [80.0, 75.0, 70.0, 65.0, 60.0]
+    intra_levels = sorted({min(85.0, max(60.0, x)) for x in intra_levels}, reverse=True)
 
     profiles = [{"name": "PRODUCTION_85_85", **PRODUCTION_GATE_CONFIG}]
     seen = {(85.0, 85.0, 10.0, 70.0)}
 
-    for s in swing_candidates:
-        for i in intra_candidates:
-            key = (float(s), float(i), 10.0, 70.0)
-            if key in seen:
-                continue
-            seen.add(key)
-            profiles.append({
-                "name": f"ADAPT_S{s:g}_I{i:g}".replace(".", "_"),
-                **PRODUCTION_GATE_CONFIG,
-                "swing_score": float(s),
-                "intraday_score": float(i),
-            })
-            if len(profiles) >= max_profiles:
-                return profiles
+    # Pair progressively reachable score gates first. This is deliberately
+    # bounded rather than a brute-force combinatorial search.
+    pairs = []
+    for idx in range(max(len(swing_levels), len(intra_levels))):
+        s_gate = swing_levels[min(idx, len(swing_levels) - 1)]
+        i_gate = intra_levels[min(idx, len(intra_levels) - 1)]
+        pairs.append((s_gate, i_gate, 10.0, 70.0))
+    # A few controlled robustness variants test leadership/quality without
+    # exploding the search space.
+    base_s = min(75.0, max(65.0, half(swing.quantile(.90)) if not swing.empty else 72.5))
+    base_i = min(75.0, max(60.0, five(intra.quantile(.90)) if not intra.empty else 70.0))
+    pairs += [
+        (base_s, base_i, 12.0, 70.0),
+        (base_s, base_i, 10.0, 75.0),
+        (base_s, base_i, 10.0, 65.0),
+    ]
 
+    for s_gate, i_gate, quality, leadership in pairs:
+        key = (float(s_gate), float(i_gate), float(quality), float(leadership))
+        if key in seen:
+            continue
+        seen.add(key)
+        profiles.append({
+            "name": f"R_S{s_gate:g}_I{i_gate:g}_Q{quality:g}_L{leadership:g}".replace(".", "_"),
+            **PRODUCTION_GATE_CONFIG,
+            "swing_score": float(s_gate),
+            "intraday_score": float(i_gate),
+            "entry_quality": float(quality),
+            "leadership_percentile": float(leadership),
+        })
+        if len(profiles) >= max_profiles:
+            break
     return profiles
 
 
@@ -3808,12 +4113,13 @@ def calibrate_thresholds_adaptive(
     slippage_bps=5.0,
     commission_bps=0.0,
     production_result=None,
-    max_profiles=16,
+    max_profiles=12,
 ):
-    """v3.4 bounded adaptive calibration using the real portfolio simulator.
+    """v3.4.1 fast bounded calibration using signal-log replay.
 
-    The live rules remain unchanged. Alternate settings are research-only and must pass
-    chronological OOS validation before they can even be considered for promotion.
+    The expensive daily/intraday scoring pass is performed once. Alternate
+    thresholds reuse the immutable production candidate log and rerun only the
+    portfolio execution layer. Live production rules remain unchanged.
     """
     if production_result is None:
         production_result = swing_backtest(
@@ -3824,53 +4130,81 @@ def calibrate_thresholds_adaptive(
             slippage_bps=slippage_bps, commission_bps=commission_bps,
         )
 
-    profiles = build_adaptive_calibration_profiles(production_result, max_profiles=max_profiles)
-    # Reuse production result and only rerun alternate research profiles.
-    alternate = [p for p in profiles if p.get("name") != "PRODUCTION_85_85"]
-    cal = calibrate_thresholds(
-        bars, spy_bars, qqq_bars=qqq_bars, daily_bars=daily_bars,
-        market_daily_bars=market_daily_bars, starting_capital=starting_capital,
-        risk_pct=risk_pct, max_positions=max_positions,
-        max_holding_days=max_holding_days, scan_time=scan_time,
-        slippage_bps=slippage_bps, commission_bps=commission_bps,
-        profiles=alternate,
+    signal_log = production_result.get("signal_log", pd.DataFrame())
+    profiles = build_adaptive_calibration_profiles(
+        production_result, max_profiles=max_profiles
     )
+    rows = []
+    detailed = {"PRODUCTION_85_85": production_result}
 
-    # Add the already-computed production row without rerunning it.
-    prod_stats = production_result.get("stats", {})
-    prod_val = production_result.get("validation", {})
-    prod_row = {
-        "profile": "PRODUCTION_85_85", "production_rules": True,
-        "swing_score_gate": PRODUCTION_GATE_CONFIG["swing_score"],
-        "intraday_score_gate": PRODUCTION_GATE_CONFIG["intraday_score"],
-        "entry_quality_gate": PRODUCTION_GATE_CONFIG["entry_quality"],
-        "leadership_gate": PRODUCTION_GATE_CONFIG["leadership_percentile"],
-        "market_score_gate": PRODUCTION_GATE_CONFIG["market_score"],
-        "reward_risk_gate": PRODUCTION_GATE_CONFIG["reward_risk"],
-        "max_distribution_days": PRODUCTION_GATE_CONFIG["max_distribution_days"],
-        "trades": prod_stats.get("trades", 0),
-        "return_pct": prod_stats.get("total_return_pct", 0),
-        "win_rate_pct": prod_stats.get("win_rate_pct", 0),
-        "profit_factor": prod_stats.get("profit_factor", 0),
-        "expectancy_r": prod_stats.get("expectancy_r", 0),
-        "max_drawdown_pct": prod_stats.get("max_drawdown_pct", 0),
-        "out_of_sample_trades": prod_val.get("out_of_sample_trades", 0),
-        "out_of_sample_win_rate_pct": prod_val.get("out_of_sample_win_rate_pct", 0),
-        "out_of_sample_expectancy_r": prod_val.get("out_of_sample_expectancy_r", 0),
-        "out_of_sample_profit_factor": prod_val.get("out_of_sample_profit_factor", 0),
-        "bootstrap_expectancy_low_r": prod_val.get("bootstrap_expectancy_low_r"),
-        "bootstrap_expectancy_high_r": prod_val.get("bootstrap_expectancy_high_r"),
-        "confidence_grade": prod_val.get("confidence_grade", "INSUFFICIENT"),
-        "validation_pass": bool(prod_val.get("validation_pass", False)),
+    def comparison_row(name, config, result, production=False):
+        stats = result.get("stats", {})
+        val = result.get("validation", {})
+        return {
+            "profile": name,
+            "production_rules": bool(production),
+            "swing_score_gate": config.get("swing_score"),
+            "intraday_score_gate": config.get("intraday_score"),
+            "entry_quality_gate": config.get("entry_quality"),
+            "leadership_gate": config.get("leadership_percentile"),
+            "market_score_gate": config.get("market_score"),
+            "reward_risk_gate": config.get("reward_risk"),
+            "max_distribution_days": config.get("max_distribution_days"),
+            "trades": stats.get("trades", 0),
+            "return_pct": stats.get("total_return_pct", 0),
+            "win_rate_pct": stats.get("win_rate_pct", 0),
+            "profit_factor": stats.get("profit_factor", 0),
+            "expectancy_r": stats.get("expectancy_r", 0),
+            "max_drawdown_pct": stats.get("max_drawdown_pct", 0),
+            "out_of_sample_trades": val.get("out_of_sample_trades", 0),
+            "out_of_sample_win_rate_pct": val.get("out_of_sample_win_rate_pct", 0),
+            "out_of_sample_expectancy_r": val.get("out_of_sample_expectancy_r", 0),
+            "out_of_sample_profit_factor": val.get("out_of_sample_profit_factor", 0),
+            "bootstrap_expectancy_low_r": val.get("bootstrap_expectancy_low_r"),
+            "bootstrap_expectancy_high_r": val.get("bootstrap_expectancy_high_r"),
+            "confidence_grade": val.get("confidence_grade", "INSUFFICIENT"),
+            "validation_pass": bool(val.get("validation_pass", False)),
+        }
+
+    rows.append(comparison_row(
+        "PRODUCTION_85_85", PRODUCTION_GATE_CONFIG, production_result, True
+    ))
+
+    for profile in profiles:
+        name = profile.get("name", "UNNAMED")
+        if name == "PRODUCTION_85_85":
+            continue
+        config = {k: v for k, v in profile.items() if k != "name"}
+        result = replay_signal_log_backtest(
+            bars,
+            signal_log,
+            daily_bars=daily_bars,
+            starting_capital=starting_capital,
+            risk_pct=risk_pct,
+            max_positions=max_positions,
+            max_holding_days=max_holding_days,
+            slippage_bps=slippage_bps,
+            commission_bps=commission_bps,
+            gate_config=config,
+        )
+        detailed[name] = result
+        rows.append(comparison_row(name, config, result, False))
+
+    comparison = _add_v34_research_decision(pd.DataFrame(rows))
+    return {
+        "comparison": comparison,
+        "results": detailed,
+        "score_distribution": production_result.get("diagnostics", {}).get(
+            "score_distribution", pd.DataFrame()
+        ),
+        "profiles_tested": len(profiles),
+        "production_result": production_result,
+        "adaptive_profiles": pd.DataFrame(profiles),
+        "engine": "FAST_SIGNAL_REPLAY_V3_4_1",
+        "recommendation": (
+            "KEEP_PRODUCTION_RULES"
+            if not comparison.get("promotion_candidate", pd.Series(dtype=bool)).any()
+            else "REVIEW_PROMOTION_CANDIDATES"
+        ),
     }
-    comparison = pd.concat([pd.DataFrame([prod_row]), cal.get("comparison", pd.DataFrame())], ignore_index=True)
-    comparison = _add_v34_research_decision(comparison)
-    cal["comparison"] = comparison
-    cal["profiles_tested"] = len(profiles)
-    cal["production_result"] = production_result
-    cal["adaptive_profiles"] = pd.DataFrame(profiles)
-    cal["recommendation"] = (
-        "KEEP_PRODUCTION_RULES" if not comparison.get("promotion_candidate", pd.Series(dtype=bool)).any()
-        else "REVIEW_PROMOTION_CANDIDATES"
-    )
-    return cal
+
