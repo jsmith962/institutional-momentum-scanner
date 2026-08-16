@@ -3,36 +3,31 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import streamlit as st
 import plotly.express as px
+import streamlit as st
 from dotenv import load_dotenv
 
+from alerts import (
+    build_buy_message,
+    build_sell_message,
+    send_sms,
+    sms_configured,
+)
+from backtest import swing_backtest, calibrate_thresholds_adaptive
+from calibration_ui import render_calibration_lab
 from market_data import (
     eligible_us_equity_universe,
     get_bars,
     get_bars_batched,
 )
-
 from strategy import (
+    classify,
+    combine_daily_intraday_signal,
     prefilter_daily,
     prepare_intraday,
-    classify,
-    score_swing_daily,
     relative_strength_percentiles,
-    combine_daily_intraday_signal,
+    score_swing_daily,
 )
-
-from backtest import swing_backtest
-
-from alerts import (
-    sms_configured,
-    send_sms,
-    build_buy_message,
-    build_sell_message,
-)
-
-from validation import chronological_validation
-from calibration_ui import render_calibration_lab
 
 
 # ============================================================
@@ -40,19 +35,17 @@ from calibration_ui import render_calibration_lab
 # ============================================================
 
 load_dotenv()
-
 ET = ZoneInfo("America/New_York")
 
 st.set_page_config(
-    page_title="Institutional Swing Scanner v3.3",
+    page_title="Institutional Swing Scanner v3.4",
     layout="wide",
 )
 
-st.title("Institutional Swing Scanner v3.3")
-
+st.title("Institutional Swing Scanner v3.4")
 st.caption(
-    "Full U.S. market • catalyst-gap protection • daily + intraday confirmation • "
-    "SMS alerts • production-equivalent backtesting • out-of-sample validation • "
+    "Full U.S. market â¢ catalyst-gap protection â¢ daily + intraday confirmation â¢ "
+    "SMS alerts â¢ production-equivalent backtesting â¢ adaptive walk-forward calibration â¢ "
     "no live orders"
 )
 
@@ -77,12 +70,12 @@ if "latest_backtest_settings" not in st.session_state:
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# HELPERS
 # ============================================================
 
 def money(value):
     try:
-        if pd.isna(value):
+        if value is None or pd.isna(value):
             return "N/A"
         return f"${float(value):,.2f}"
     except Exception:
@@ -91,7 +84,7 @@ def money(value):
 
 def score_display(value):
     try:
-        if pd.isna(value):
+        if value is None or pd.isna(value):
             return "N/A"
         return f"{float(value):.1f}"
     except Exception:
@@ -100,52 +93,31 @@ def score_display(value):
 
 def rr_display(value):
     try:
-        if pd.isna(value):
+        if value is None or pd.isna(value):
             return "N/A"
         return f"{float(value):.2f}:1"
     except Exception:
         return "N/A"
 
 
-def pct_display(value):
-    try:
-        if pd.isna(value):
-            return "N/A"
-        return f"{float(value):.1f}%"
-    except Exception:
-        return "N/A"
+def signal_icon(signal):
+    if signal in {"A+ SWING BUY", "BUY"}:
+        return "ð¢"
+    if signal == "WATCH":
+        return "ð¡"
+    if signal == "TOO EXTENDED":
+        return "ð´"
+    return "âª"
 
 
 def action_text(signal):
-    if signal == "A+ SWING BUY":
-        return "BUY — top-tier setup confirmed"
-
-    if signal == "BUY":
-        return "BUY — entry rules confirmed"
-
-    if signal == "WATCH":
-        return "WAIT FOR BUY TRIGGER"
-
-    if signal == "TOO EXTENDED":
-        return "WAIT FOR PULLBACK / RETEST"
-
-    if signal == "AVOID":
-        return "PASS"
-
-    return "WAIT"
-
-
-def signal_icon(signal):
-    if signal in ["A+ SWING BUY", "BUY"]:
-        return "🟢"
-
-    if signal == "WATCH":
-        return "🟡"
-
-    if signal == "TOO EXTENDED":
-        return "🔴"
-
-    return "⚪"
+    return {
+        "A+ SWING BUY": "BUY â top-tier setup confirmed",
+        "BUY": "BUY â entry rules confirmed",
+        "WATCH": "WAIT FOR BUY TRIGGER",
+        "TOO EXTENDED": "WAIT FOR PULLBACK / RETEST",
+        "AVOID": "PASS",
+    }.get(signal, "WAIT")
 
 
 def safe_float(value, default=0.0):
@@ -161,61 +133,30 @@ def why_not_buy(row):
     signal = row.get("signal", "")
 
     if bool(row.get("risk_flag", False)):
-        return str(
-            row.get(
-                "risk_reason",
-                "A hard downside catalyst-risk gate is active.",
-            )
-        )
+        return str(row.get("risk_reason", "A hard downside catalyst-risk gate is active."))
 
-    if signal in ["A+ SWING BUY", "BUY"]:
+    if signal in {"A+ SWING BUY", "BUY"}:
         return "All required BUY gates passed."
 
     if signal == "TOO EXTENDED":
-        return (
-            "The stock is too extended from its preferred entry. "
-            "Wait for a pullback or retest."
-        )
-
-    if signal == "AVOID":
-        return (
-            "The setup does not currently meet enough of the "
-            "high-probability swing requirements."
-        )
+        return "The stock is too extended from its preferred entry. Wait for a pullback or retest."
 
     failures = []
 
-    swing_score = safe_float(
-        row.get("swing_score"),
-        0,
-    )
-
-    entry_quality = safe_float(
-        row.get("entry_quality"),
-        0,
-    )
-
-    reward_risk = safe_float(
-        row.get("reward_risk"),
-        0,
-    )
+    swing_score = safe_float(row.get("swing_score"))
+    entry_quality = safe_float(row.get("entry_quality"))
+    reward_risk = safe_float(row.get("reward_risk"))
 
     try:
         price = float(row.get("price", 0))
         entry_low = float(row.get("entry_low", 0))
         entry_high = float(row.get("entry_high", 0))
-
-        inside_entry_zone = (
-            entry_low <= price <= entry_high
-        )
-
+        inside_entry_zone = entry_low <= price <= entry_high
     except Exception:
         inside_entry_zone = False
 
     if swing_score < 85:
-        failures.append(
-            f"Swing Score {swing_score:.1f} is below the 85 BUY threshold"
-        )
+        failures.append(f"Swing Score {swing_score:.1f} is below the 85 BUY threshold")
 
     if entry_quality < 10:
         failures.append(
@@ -223,27 +164,16 @@ def why_not_buy(row):
         )
 
     if reward_risk < 2:
-        failures.append(
-            f"Reward/Risk {reward_risk:.2f}:1 is below the required 2.00:1"
-        )
+        failures.append(f"Reward/Risk {reward_risk:.2f}:1 is below the required 2.00:1")
 
     if not inside_entry_zone:
-        failures.append(
-            "Current price is outside the preferred entry zone"
-        )
+        failures.append("Current price is outside the preferred entry zone")
 
     if not bool(row.get("trend_health", True)):
-        failures.append(
-            "The 20-day and 50-day trend slopes are not both rising"
-        )
+        failures.append("The 20-day and 50-day trend slopes are not both rising")
 
     try:
-        distribution_days = int(
-            row.get(
-                "distribution_days",
-                0,
-            )
-        )
+        distribution_days = int(row.get("distribution_days", 0))
     except Exception:
         distribution_days = 0
 
@@ -252,419 +182,95 @@ def why_not_buy(row):
             f"{distribution_days} recent distribution days show excessive selling pressure"
         )
 
-    leadership = row.get(
-        "leadership_percentile"
-    )
-
-    if (
-        leadership is not None
-        and not pd.isna(leadership)
-        and float(leadership) < 70
-    ):
+    leadership = row.get("leadership_percentile")
+    if leadership is not None and not pd.isna(leadership) and float(leadership) < 70:
         failures.append(
             f"Market leadership rank {float(leadership):.0f}% is below the 70% BUY gate"
         )
 
-    if not bool(
-        row.get(
-            "intraday_confirmed",
-            True,
-        )
-    ):
+    if not bool(row.get("intraday_confirmed", True)):
+        failures.append("Live intraday BUY confirmation has not passed")
+
+    if signal == "AVOID" and not failures:
+        failures.append("The setup does not meet enough high-probability swing requirements")
+
+    if signal == "WATCH" and not failures:
         failures.append(
-            "Live intraday BUY confirmation has not passed"
+            "Visible price, score and risk gates pass, but broader market/regime "
+            "confirmation has not yet passed the BUY requirement"
         )
 
-    if (
-        not failures
-        and signal == "WATCH"
-    ):
-        failures.append(
-            "Visible price, score and risk gates pass, but the broader "
-            "market/regime confirmation has not yet passed the BUY requirement"
-        )
-
-    if not failures:
-        return "Waiting for additional confirmation."
-
-    return " • ".join(
-        failures
-    )
+    return " â¢ ".join(failures) if failures else "Waiting for additional confirmation."
 
 
-def render_trade_card(
-    row,
-    rank_num=None,
-):
-    symbol = row["symbol"]
-    signal = row["signal"]
+def render_trade_card(row, rank_num=None):
+    signal = row.get("signal", "N/A")
+    symbol = row.get("symbol", "N/A")
+    prefix = f"#{rank_num} " if rank_num is not None else ""
 
-    title_prefix = (
-        f"#{rank_num} "
-        if rank_num is not None
-        else ""
-    )
+    with st.container(border=True):
+        st.markdown(f"### {prefix}{signal_icon(signal)} {symbol} â {signal}")
+        st.write(f"**Swing Score:** {score_display(row.get('swing_score'))}/100")
+        st.write(f"**Setup:** {row.get('setup', '')}")
+        st.write(f"**Current Price:** {money(row.get('price'))}")
+        st.write(f"**Entry Quality:** {score_display(row.get('entry_quality'))}/15")
 
-    with st.container(
-        border=True
-    ):
-
-        st.markdown(
-            f"### {title_prefix}{signal_icon(signal)} {symbol} — {signal}"
-        )
-
-        st.write(
-            f"**Swing Score:** "
-            f"{score_display(row.get('swing_score'))}/100"
-        )
-
-        st.write(
-            f"**Setup:** "
-            f"{row.get('setup', '')}"
-        )
-
-        st.write(
-            f"**Current Price:** "
-            f"{money(row.get('price'))}"
-        )
-
-        st.write(
-            f"**Entry Quality:** "
-            f"{score_display(row.get('entry_quality'))}/15"
-        )
-
-        if bool(
-            row.get(
-                "risk_flag",
-                False,
-            )
-        ):
-
+        if bool(row.get("risk_flag", False)):
             st.error(
                 "**Risk Event:** "
-                + str(
-                    row.get(
-                        "risk_reason",
-                        "Hard risk gate active",
-                    )
-                )
+                + str(row.get("risk_reason", "Hard downside catalyst-risk gate active"))
             )
-
         else:
-
-            leadership = row.get(
-                "leadership_percentile"
-            )
-
+            leadership = row.get("leadership_percentile")
             leadership_text = (
                 "N/A"
-                if (
-                    leadership is None
-                    or pd.isna(leadership)
-                )
+                if leadership is None or pd.isna(leadership)
                 else f"{float(leadership):.0f}th percentile"
             )
-
+            try:
+                distribution = int(row.get("distribution_days", 0))
+            except Exception:
+                distribution = 0
             st.caption(
-                f"Risk gate: PASS • "
-                f"Market leadership: {leadership_text} • "
-                f"Distribution days: "
-                f"{int(row.get('distribution_days', 0))}"
+                f"Risk gate: PASS â¢ Market leadership: {leadership_text} â¢ "
+                f"Distribution days: {distribution}"
             )
 
-        st.markdown(
-            "#### Entry Plan"
-        )
-
+        st.markdown("#### Entry Plan")
         st.write(
-            f"**Preferred Entry Zone:** "
-            f"{money(row.get('entry_low'))} – "
+            f"**Preferred Entry Zone:** {money(row.get('entry_low'))} â "
             f"{money(row.get('entry_high'))}"
         )
+        st.write(f"**Stop:** {money(row.get('stop'))}")
+        st.write(f"**Target 1:** {money(row.get('target1'))}")
+        st.write(f"**Target 2:** {money(row.get('target2'))}")
+        st.write(f"**Reward / Risk:** {rr_display(row.get('reward_risk'))}")
 
-        st.write(
-            f"**Stop:** "
-            f"{money(row.get('stop'))}"
-        )
-
-        st.write(
-            f"**Target 1:** "
-            f"{money(row.get('target1'))}"
-        )
-
-        st.write(
-            f"**Target 2:** "
-            f"{money(row.get('target2'))}"
-        )
-
-        st.write(
-            f"**Reward / Risk:** "
-            f"{rr_display(row.get('reward_risk'))}"
-        )
-
-        st.markdown(
-            "#### Action"
-        )
-
-        if signal in [
-            "A+ SWING BUY",
-            "BUY",
-        ]:
-
+        st.markdown("#### Action")
+        if signal in {"A+ SWING BUY", "BUY"}:
+            st.success(action_text(signal))
+            st.markdown("#### Why BUY?")
             st.success(
-                action_text(signal)
+                "Swing score, entry quality, reward/risk, entry zone and market "
+                "confirmation all passed the production BUY rules."
             )
-
         elif signal == "WATCH":
-
-            st.warning(
-                action_text(signal)
-            )
-
+            st.warning(action_text(signal))
+            st.markdown("#### Why Not BUY Yet?")
+            st.info(why_not_buy(row))
         elif signal == "TOO EXTENDED":
-
-            st.error(
-                action_text(signal)
-            )
-
+            st.error(action_text(signal))
+            st.markdown("#### Why Not BUY Yet?")
+            st.info(why_not_buy(row))
         else:
-
-            st.info(
-                action_text(signal)
-            )
-
-        if signal not in [
-            "A+ SWING BUY",
-            "BUY",
-        ]:
-
-            st.markdown(
-                "#### Why Not BUY Yet?"
-            )
-
-            st.info(
-                why_not_buy(row)
-            )
-
-        else:
-
-            st.markdown(
-                "#### Why BUY?"
-            )
-
-            st.success(
-                "Swing score, entry quality, reward/risk, entry zone "
-                "and market confirmation all passed the BUY rules."
-            )
+            st.info(action_text(signal))
+            st.markdown("#### Why Not BUY Yet?")
+            st.info(why_not_buy(row))
 
         st.caption(
-            f"Intraday confirmation: "
-            f"{row.get('intraday_signal', 'N/A')} "
+            f"Intraday confirmation: {row.get('intraday_signal', 'N/A')} "
             f"({row.get('intraday_score', 'N/A')}/100)"
         )
-
-
-def calibration_summary(
-    signal_log,
-):
-    """
-    Diagnostic threshold sensitivity.
-
-    IMPORTANT:
-    This does NOT recalculate trades under altered thresholds.
-    It only shows how many historical observations would clear
-    selected score/quality/confirmation levels.
-    """
-
-    if (
-        signal_log is None
-        or signal_log.empty
-    ):
-        return pd.DataFrame()
-
-    frame = signal_log.copy()
-
-    required = [
-        "swing_score",
-        "intraday_score",
-        "entry_quality",
-    ]
-
-    for column in required:
-        if column not in frame:
-            return pd.DataFrame()
-
-    for column in required:
-        frame[column] = pd.to_numeric(
-            frame[column],
-            errors="coerce",
-        )
-
-    rows = []
-
-    score_levels = [
-        85.0,
-        82.5,
-        80.0,
-        77.5,
-        75.0,
-    ]
-
-    intraday_levels = [
-        85.0,
-        80.0,
-        75.0,
-    ]
-
-    quality_levels = [
-        10.0,
-        12.0,
-        15.0,
-    ]
-
-    total = len(frame)
-
-    for swing_threshold in score_levels:
-
-        for intraday_threshold in intraday_levels:
-
-            for quality_threshold in quality_levels:
-
-                mask = (
-                    (
-                        frame["swing_score"]
-                        >= swing_threshold
-                    )
-                    & (
-                        frame["intraday_score"]
-                        >= intraday_threshold
-                    )
-                    & (
-                        frame["entry_quality"]
-                        >= quality_threshold
-                    )
-                )
-
-                if (
-                    "risk_flag"
-                    in frame.columns
-                ):
-
-                    mask = (
-                        mask
-                        & ~frame[
-                            "risk_flag"
-                        ].fillna(
-                            False
-                        ).astype(
-                            bool
-                        )
-                    )
-
-                if (
-                    "trend_health"
-                    in frame.columns
-                ):
-
-                    mask = (
-                        mask
-                        & frame[
-                            "trend_health"
-                        ].fillna(
-                            False
-                        ).astype(
-                            bool
-                        )
-                    )
-
-                if (
-                    "distribution_days"
-                    in frame.columns
-                ):
-
-                    distribution = pd.to_numeric(
-                        frame[
-                            "distribution_days"
-                        ],
-                        errors="coerce",
-                    )
-
-                    mask = (
-                        mask
-                        & (
-                            distribution
-                            <= 4
-                        )
-                    )
-
-                if (
-                    "leadership_percentile"
-                    in frame.columns
-                ):
-
-                    leadership = pd.to_numeric(
-                        frame[
-                            "leadership_percentile"
-                        ],
-                        errors="coerce",
-                    )
-
-                    mask = (
-                        mask
-                        & (
-                            leadership.isna()
-                            | (
-                                leadership
-                                >= 70
-                            )
-                        )
-                    )
-
-                count = int(
-                    mask.sum()
-                )
-
-                rows.append(
-                    {
-                        "Swing threshold": swing_threshold,
-                        "Intraday threshold": intraday_threshold,
-                        "Entry quality": quality_threshold,
-                        "Historical candidates": count,
-                        "% observations": (
-                            round(
-                                count
-                                / max(
-                                    total,
-                                    1,
-                                )
-                                * 100,
-                                2,
-                            )
-                        ),
-                    }
-                )
-
-    result = pd.DataFrame(
-        rows
-    )
-
-    return (
-        result.sort_values(
-            [
-                "Historical candidates",
-                "Swing threshold",
-                "Intraday threshold",
-            ],
-            ascending=[
-                False,
-                False,
-                False,
-            ],
-        )
-        .reset_index(
-            drop=True
-        )
-    )
 
 
 # ============================================================
@@ -672,56 +278,28 @@ def calibration_summary(
 # ============================================================
 
 with st.sidebar:
+    st.header("Text alerts")
 
-    st.header(
-        "Text alerts"
-    )
+    sms_enabled = st.toggle("Send SMS alerts", value=False)
+    sms_buy_enabled = st.checkbox("Text BUY signals", value=True)
+    sms_sell_enabled = st.checkbox("Text SELL signals", value=True)
 
-    sms_enabled = st.toggle(
-        "Send SMS alerts",
-        value=False,
-    )
-
-    sms_buy_enabled = st.checkbox(
-        "Text BUY signals",
-        value=True,
-    )
-
-    sms_sell_enabled = st.checkbox(
-        "Text SELL signals",
-        value=True,
-    )
-
-    st.caption(
-        "Phone numbers and Twilio credentials stay in Streamlit Secrets."
-    )
+    st.caption("Phone numbers and Twilio credentials stay in Streamlit Secrets.")
 
     if sms_enabled:
-
         if sms_configured():
-
-            st.success(
-                "SMS configured"
-            )
-
+            st.success("SMS configured")
         else:
-
-            st.warning(
-                "SMS secrets are not configured yet."
-            )
+            st.warning("SMS secrets are not configured yet.")
 
     st.divider()
-
-    st.subheader(
-        "Tracked positions"
-    )
-
+    st.subheader("Tracked positions")
     tracked_positions = st.text_input(
         "Symbols you currently hold",
         "",
         help=(
-            "Example: NVDA,MU,OWL. "
-            "SELL-risk alerts are evaluated only for symbols entered here."
+            "Example: NVDA,MU,OWL. SELL-risk alerts are evaluated only for "
+            "symbols entered here."
         ),
     )
 
@@ -731,34 +309,26 @@ with st.sidebar:
 # ============================================================
 
 with tab1:
-
-    st.subheader(
-        "Full U.S. Market Swing-Trade Scanner"
-    )
+    st.subheader("Full U.S. Market Swing-Trade Scanner")
 
     st.write(
-        "The scanner first removes unsuitable securities and illiquid stocks, "
-        "then analyzes intraday momentum and daily swing-trade structure separately."
+        "The scanner removes unsuitable securities and illiquid stocks, then "
+        "analyzes daily swing structure and live intraday momentum separately."
     )
 
     st.info(
-        "A strong stock is not automatically a BUY. "
-        "The swing engine blocks abnormal downside catalyst gaps, requires "
-        "rising trends and market leadership, and will not issue a BUY until "
-        "the live intraday confirmation also passes."
+        "A strong stock is not automatically a BUY. Production rules retain the "
+        "85 Swing Score and 85 Intraday Score gates plus catalyst, trend, leadership, "
+        "entry-zone and risk/reward protections. v3.4 calibration is research-only."
     )
 
-    c1, c2 = st.columns(
-        2
-    )
+    c1, c2 = st.columns(2)
 
     feed = c1.selectbox(
         "Data feed",
-        [
-            "iex",
-            "sip",
-        ],
+        ["iex", "sip"],
         index=0,
+        help="Use SIP when your Alpaca plan supports consolidated market data.",
     )
 
     finalists_n = c2.slider(
@@ -769,76 +339,26 @@ with tab1:
         25,
     )
 
-    if st.button(
-        "RUN FULL-MARKET SWING SCAN",
-        type="primary",
-        width="stretch",
-    ):
+    if st.button("RUN FULL-MARKET SWING SCAN", type="primary", width="stretch"):
+        os.environ["ALPACA_FEED"] = feed
 
-        os.environ[
-            "ALPACA_FEED"
-        ] = feed
-
-        status = st.status(
-            "Scanning the U.S. market...",
-            expanded=True,
-        )
-
-        progress = st.progress(
-            0
-        )
+        status = st.status("Scanning the U.S. market...", expanded=True)
+        progress = st.progress(0)
 
         try:
+            status.write("1/5 Filtering eligible U.S. securities...")
+            elig = eligible_us_equity_universe()
+            universe = elig.symbol.tolist()
+            status.write(f"Eligible after type filtering: {len(universe):,}")
 
-            status.write(
-                "1/5 Filtering eligible U.S. securities..."
-            )
+            now = datetime.now(ET)
+            daily_start = now - timedelta(days=45)
 
-            elig = (
-                eligible_us_equity_universe()
-            )
+            status.write("2/5 Applying price, liquidity, trend and momentum filters...")
 
-            universe = (
-                elig.symbol.tolist()
-            )
-
-            status.write(
-                f"Eligible after type filtering: "
-                f"{len(universe):,}"
-            )
-
-            now = datetime.now(
-                ET
-            )
-
-            daily_start = (
-                now
-                - timedelta(
-                    days=45
-                )
-            )
-
-            status.write(
-                "2/5 Applying price, liquidity, trend and momentum filters..."
-            )
-
-            def prog(
-                done,
-                total,
-            ):
-
+            def prog(done, total):
                 progress.progress(
-                    min(
-                        int(
-                            done
-                            / max(
-                                total,
-                                1,
-                            )
-                            * 40
-                        ),
-                        40,
-                    )
+                    min(int(done / max(total, 1) * 40), 40)
                 )
 
             daily = get_bars_batched(
@@ -853,24 +373,10 @@ with tab1:
             )
 
             if daily.empty:
-
-                status.update(
-                    label=(
-                        "No daily market data returned."
-                    ),
-                    state="error",
-                )
-
+                status.update(label="No daily market data returned.", state="error")
                 st.stop()
 
-            daily[
-                "timestamp"
-            ] = pd.to_datetime(
-                daily[
-                    "timestamp"
-                ],
-                utc=True,
-            )
+            daily["timestamp"] = pd.to_datetime(daily["timestamp"], utc=True)
 
             finalists = prefilter_daily(
                 daily,
@@ -882,39 +388,15 @@ with tab1:
             )
 
             if finalists.empty:
-
-                status.update(
-                    label=(
-                        "No qualifying finalists found."
-                    ),
-                    state="complete",
-                )
-
+                status.update(label="No qualifying finalists found.", state="complete")
                 st.stop()
 
-            status.write(
-                f"Finalists after eligibility filters: "
-                f"{len(finalists)}"
-            )
+            status.write(f"Finalists after eligibility filters: {len(finalists)}")
+            progress.progress(45)
 
-            progress.progress(
-                45
-            )
-
-            status.write(
-                "3/5 Pulling longer daily history for swing-trade analysis..."
-            )
-
-            finalist_symbols = (
-                finalists.symbol.tolist()
-            )
-
-            swing_start = (
-                now
-                - timedelta(
-                    days=420
-                )
-            )
+            status.write("3/5 Pulling longer daily history for swing-trade analysis...")
+            finalist_symbols = finalists.symbol.tolist()
+            swing_start = now - timedelta(days=420)
 
             swing_daily = get_bars_batched(
                 finalist_symbols,
@@ -927,10 +409,7 @@ with tab1:
             )
 
             market_daily = get_bars(
-                [
-                    "SPY",
-                    "QQQ",
-                ],
+                ["SPY", "QQQ"],
                 swing_start,
                 now,
                 "1Day",
@@ -938,78 +417,36 @@ with tab1:
             )
 
             if not swing_daily.empty:
-
-                swing_daily[
-                    "timestamp"
-                ] = pd.to_datetime(
-                    swing_daily[
-                        "timestamp"
-                    ],
-                    utc=True,
+                swing_daily["timestamp"] = pd.to_datetime(
+                    swing_daily["timestamp"], utc=True
                 )
 
             if not market_daily.empty:
-
-                market_daily[
-                    "timestamp"
-                ] = pd.to_datetime(
-                    market_daily[
-                        "timestamp"
-                    ],
-                    utc=True,
+                market_daily["timestamp"] = pd.to_datetime(
+                    market_daily["timestamp"], utc=True
                 )
 
             spy_daily = (
-                market_daily[
-                    market_daily[
-                        "symbol"
-                    ]
-                    == "SPY"
-                ].copy()
+                market_daily[market_daily["symbol"] == "SPY"].copy()
                 if not market_daily.empty
                 else pd.DataFrame()
             )
 
             qqq_daily = (
-                market_daily[
-                    market_daily[
-                        "symbol"
-                    ]
-                    == "QQQ"
-                ].copy()
+                market_daily[market_daily["symbol"] == "QQQ"].copy()
                 if not market_daily.empty
                 else pd.DataFrame()
             )
 
-            leadership_map = (
-                relative_strength_percentiles(
-                    swing_daily
-                )
-            )
+            leadership_map = relative_strength_percentiles(swing_daily)
+            progress.progress(60)
 
-            progress.progress(
-                60
-            )
-
-            status.write(
-                "4/5 Pulling intraday bars for finalists and SPY..."
-            )
-
-            market_start = (
-                now.replace(
-                    hour=9,
-                    minute=30,
-                    second=0,
-                    microsecond=0,
-                )
-            )
+            status.write("4/5 Pulling intraday bars for finalists and SPY...")
+            market_start = now.replace(hour=9, minute=30, second=0, microsecond=0)
 
             intra = get_bars_batched(
                 finalist_symbols,
-                market_start
-                - timedelta(
-                    days=1
-                ),
+                market_start - timedelta(days=1),
                 now,
                 "1Min",
                 feed,
@@ -1018,199 +455,78 @@ with tab1:
             )
 
             spy = get_bars(
-                [
-                    "SPY",
-                ],
-                market_start
-                - timedelta(
-                    days=1
-                ),
+                ["SPY"],
+                market_start - timedelta(days=1),
                 now,
                 "1Min",
                 feed,
             )
 
-            progress.progress(
-                75
-            )
+            progress.progress(75)
 
-            if intra.empty:
-
-                status.update(
-                    label=(
-                        "No intraday bars returned."
-                    ),
-                    state="error",
-                )
-
+            if intra.empty or spy.empty:
+                status.update(label="No intraday bars returned.", state="error")
                 st.stop()
 
-            intra[
-                "timestamp"
-            ] = pd.to_datetime(
-                intra[
-                    "timestamp"
-                ],
-                utc=True,
-            )
+            intra["timestamp"] = pd.to_datetime(intra["timestamp"], utc=True)
+            spy["timestamp"] = pd.to_datetime(spy["timestamp"], utc=True)
 
-            spy[
-                "timestamp"
-            ] = pd.to_datetime(
-                spy[
-                    "timestamp"
-                ],
-                utc=True,
-            )
-
-            latest = (
-                intra.timestamp
-                .dt
-                .tz_convert(
-                    ET
-                )
-                .dt
-                .date
-                .max()
-            )
+            latest = intra.timestamp.dt.tz_convert(ET).dt.date.max()
 
             today = intra[
-                intra.timestamp
-                .dt
-                .tz_convert(
-                    ET
-                )
-                .dt
-                .date
-                == latest
+                intra.timestamp.dt.tz_convert(ET).dt.date == latest
             ]
 
             spy_today = spy[
-                spy.timestamp
-                .dt
-                .tz_convert(
-                    ET
-                )
-                .dt
-                .date
-                == latest
+                spy.timestamp.dt.tz_convert(ET).dt.date == latest
             ]
 
-            fmap = (
-                finalists
-                .set_index(
-                    "symbol"
-                )
-                .to_dict(
-                    "index"
-                )
-            )
-
+            fmap = finalists.set_index("symbol").to_dict("index")
             advmap = dict(
-                zip(
-                    finalists.symbol,
-                    finalists.avg_dollar_volume,
-                )
+                zip(finalists.symbol, finalists.avg_dollar_volume)
             )
 
             status.write(
-                "5/5 Applying intraday confirmation, swing setup, "
-                "entry quality and risk rules..."
+                "5/5 Applying intraday confirmation, swing setup, entry quality "
+                "and risk rules..."
             )
 
             rows = []
 
-            for (
-                sym,
-                d,
-            ) in today.groupby(
-                "symbol"
-            ):
-
+            for sym, d in today.groupby("symbol"):
                 if len(d) < 20:
                     continue
 
-                ref = fmap.get(
-                    sym,
-                    {},
-                )
+                ref = fmap.get(sym, {})
+                px = max(float(ref.get("price", 1)), 0.01)
 
-                px = max(
-                    float(
-                        ref.get(
-                            "price",
-                            1,
-                        )
-                    ),
-                    0.01,
-                )
+                adv_dollars = float(advmap.get(sym, 0) or 0)
+                adv_shares = adv_dollars / px if adv_dollars else None
 
-                adv = (
-                    float(
-                        advmap.get(
-                            sym,
-                            0,
-                        )
-                    )
-                    / px
-                    if advmap.get(
-                        sym,
-                        0,
-                    )
-                    else None
-                )
-
-                p = prepare_intraday(
-                    d,
-                    spy_today,
-                    adv,
-                )
-
+                p = prepare_intraday(d, spy_today, adv_shares)
                 if p.empty:
                     continue
 
-                r = p.iloc[
-                    -1
-                ]
+                r = p.iloc[-1]
 
-                (
-                    intraday_score,
-                    intraday_signal,
-                    reasons,
-                ) = classify(
+                intraday_score, intraday_signal, reasons = classify(
                     r,
-                    advmap.get(
-                        sym,
-                        0,
-                    ),
+                    advmap.get(sym, 0),
                 )
 
                 stock_swing_daily = (
-                    pd.DataFrame()
+                    swing_daily[swing_daily["symbol"] == sym].copy()
+                    if not swing_daily.empty
+                    else pd.DataFrame()
                 )
 
-                if not swing_daily.empty:
-
-                    stock_swing_daily = (
-                        swing_daily[
-                            swing_daily[
-                                "symbol"
-                            ]
-                            == sym
-                        ].copy()
-                    )
-
                 swing = None
-
                 if not stock_swing_daily.empty:
-
                     swing = score_swing_daily(
                         stock_swing_daily,
                         spy_daily,
                         qqq_daily,
-                        leadership_map.get(
-                            sym
-                        ),
+                        leadership_map.get(sym),
                     )
 
                 swing_signal = "N/A"
@@ -1235,264 +551,83 @@ with tab1:
                 market_score = None
 
                 if swing:
-
-                    swing_signal = (
-                        swing.get(
-                            "signal",
-                            "N/A",
-                        )
-                    )
-
-                    swing_score = (
-                        swing.get(
-                            "swing_score",
-                            0,
-                        )
-                    )
-
-                    setup = swing.get(
-                        "setup",
-                        "",
-                    )
-
-                    entry_quality = (
-                        swing.get(
-                            "entry_quality",
-                            0,
-                        )
-                    )
-
-                    entry_low = (
-                        swing.get(
-                            "entry_low"
-                        )
-                    )
-
-                    entry_high = (
-                        swing.get(
-                            "entry_high"
-                        )
-                    )
-
-                    stop = (
-                        swing.get(
-                            "stop"
-                        )
-                    )
-
-                    target1 = (
-                        swing.get(
-                            "target1"
-                        )
-                    )
-
-                    target2 = (
-                        swing.get(
-                            "target2"
-                        )
-                    )
-
-                    reward_risk = (
-                        swing.get(
-                            "reward_risk"
-                        )
-                    )
-
-                    swing_rsi = (
-                        swing.get(
-                            "rsi14"
-                        )
-                    )
-
-                    swing_rvol = (
-                        swing.get(
-                            "rvol"
-                        )
-                    )
-
-                    risk_flag = bool(
-                        swing.get(
-                            "risk_flag",
-                            False,
-                        )
-                    )
-
-                    risk_reason = (
-                        swing.get(
-                            "risk_reason",
-                            "",
-                        )
-                    )
-
-                    gap_down_pct = (
-                        swing.get(
-                            "gap_down_pct",
-                            0,
-                        )
-                    )
-
-                    event_days_ago = (
-                        swing.get(
-                            "event_days_ago"
-                        )
-                    )
-
-                    trend_health = bool(
-                        swing.get(
-                            "trend_health",
-                            False,
-                        )
-                    )
-
-                    distribution_days = (
-                        swing.get(
-                            "distribution_days",
-                            0,
-                        )
-                    )
-
-                    leadership_percentile = (
-                        swing.get(
-                            "leadership_percentile"
-                        )
-                    )
-
-                    market_score = (
-                        swing.get(
-                            "market_score"
-                        )
-                    )
+                    swing_signal = swing.get("signal", "N/A")
+                    swing_score = swing.get("swing_score", 0)
+                    setup = swing.get("setup", "")
+                    entry_quality = swing.get("entry_quality", 0)
+                    entry_low = swing.get("entry_low")
+                    entry_high = swing.get("entry_high")
+                    stop = swing.get("stop")
+                    target1 = swing.get("target1")
+                    target2 = swing.get("target2")
+                    reward_risk = swing.get("reward_risk")
+                    swing_rsi = swing.get("rsi14")
+                    swing_rvol = swing.get("rvol")
+                    risk_flag = bool(swing.get("risk_flag", False))
+                    risk_reason = swing.get("risk_reason", "")
+                    gap_down_pct = swing.get("gap_down_pct", 0)
+                    event_days_ago = swing.get("event_days_ago")
+                    trend_health = bool(swing.get("trend_health", False))
+                    distribution_days = swing.get("distribution_days", 0)
+                    leadership_percentile = swing.get("leadership_percentile")
+                    market_score = swing.get("market_score")
 
                 if swing:
-
-                    (
-                        final_signal,
-                        confluence_reason,
-                    ) = combine_daily_intraday_signal(
+                    final_signal, confluence_reason = combine_daily_intraday_signal(
                         swing_signal,
                         intraday_signal,
                         intraday_score,
                         risk_flag=risk_flag,
                     )
-
                 else:
-
-                    final_signal = (
-                        "WATCH"
-                        if intraday_signal
-                        == "BUY"
-                        else intraday_signal
-                    )
-
+                    final_signal = "WATCH" if intraday_signal == "BUY" else intraday_signal
                     confluence_reason = (
                         "Daily swing history is unavailable, so an intraday BUY "
                         "cannot be promoted to a final BUY."
                     )
 
                 intraday_confirmed = bool(
-                    intraday_signal
-                    == "BUY"
-                    and intraday_score
-                    >= 85
+                    intraday_signal == "BUY" and intraday_score >= 85
                 )
 
                 if risk_flag:
-
+                    decision_reason = risk_reason
+                elif final_signal == "A+ SWING BUY":
                     decision_reason = (
-                        risk_reason
+                        "Top-tier daily setup and live intraday entry confirmation passed."
                     )
-
-                elif (
-                    final_signal
-                    == "WATCH"
-                    and (
-                        not swing
-                        or swing_signal
-                        in [
-                            "A+ SWING BUY",
-                            "BUY",
-                        ]
-                    )
-                ):
-
+                elif final_signal == "BUY":
                     decision_reason = (
-                        confluence_reason
+                        "Daily swing setup and live intraday entry confirmation passed."
                     )
-
-                elif (
-                    final_signal
-                    == "A+ SWING BUY"
+                elif final_signal == "WATCH" and (
+                    not swing or swing_signal in {"A+ SWING BUY", "BUY"}
                 ):
-
+                    decision_reason = confluence_reason
+                elif final_signal == "WATCH":
                     decision_reason = (
-                        "Top-tier daily setup and live intraday "
-                        "entry confirmation passed."
+                        "Promising setup; wait for a better entry or additional confirmation."
                     )
-
-                elif (
-                    final_signal
-                    == "BUY"
-                ):
-
+                elif final_signal == "TOO EXTENDED":
                     decision_reason = (
-                        "Daily swing setup and live intraday "
-                        "entry confirmation passed."
+                        "Strong stock but poor entry right now. Wait for a pullback or retest."
                     )
-
-                elif (
-                    final_signal
-                    == "WATCH"
-                ):
-
-                    decision_reason = (
-                        "Promising setup; wait for a better entry "
-                        "or additional confirmation."
-                    )
-
-                elif (
-                    final_signal
-                    == "TOO EXTENDED"
-                ):
-
-                    decision_reason = (
-                        "Strong stock but poor entry right now. "
-                        "Wait for a pullback or retest."
-                    )
-
-                elif (
-                    final_signal
-                    == "AVOID"
-                ):
-
+                elif final_signal == "AVOID":
                     decision_reason = (
                         "Not enough alignment for a high-quality swing entry."
                     )
-
                 else:
-
-                    decision_reason = (
-                        "; ".join(
-                            reasons
-                        )
-                    )
+                    decision_reason = "; ".join(reasons)
 
                 rows.append(
                     {
                         "symbol": sym,
-                        "name": ref.get(
-                            "name",
-                            "",
-                        ),
+                        "name": ref.get("name", ""),
                         "signal": final_signal,
                         "swing_score": swing_score,
                         "setup": setup,
                         "entry_quality": entry_quality,
-                        "price": round(
-                            float(
-                                r.close
-                            ),
-                            2,
-                        ),
+                        "price": round(float(r.close), 2),
                         "entry_low": entry_low,
                         "entry_high": entry_high,
                         "stop": stop,
@@ -1502,38 +637,14 @@ with tab1:
                         "intraday_signal": intraday_signal,
                         "intraday_score": intraday_score,
                         "change_today_%": round(
-                            float(
-                                r.get(
-                                    "stock_ret",
-                                    0,
-                                )
-                            )
-                            * 100,
-                            2,
+                            float(r.get("stock_ret", 0)) * 100, 2
                         ),
                         "rel_volume": round(
-                            float(
-                                r.get(
-                                    "rel_volume",
-                                    0,
-                                )
-                            ),
-                            2,
+                            float(r.get("rel_volume", 0)), 2
                         ),
-                        "vwap": round(
-                            float(
-                                r.vwap
-                            ),
-                            2,
-                        ),
+                        "vwap": round(float(r.vwap), 2),
                         "intraday_rsi": round(
-                            float(
-                                r.rsi
-                            )
-                            if pd.notna(
-                                r.rsi
-                            )
-                            else 50,
+                            float(r.rsi) if pd.notna(r.rsi) else 50,
                             1,
                         ),
                         "swing_rsi": swing_rsi,
@@ -1547,56 +658,27 @@ with tab1:
                         "leadership_percentile": leadership_percentile,
                         "market_score": market_score,
                         "intraday_confirmed": intraday_confirmed,
-                        "vs_SPY_%": round(
-                            float(
-                                r.get(
-                                    "rs",
-                                    0,
-                                )
-                            )
-                            * 100,
-                            2,
-                        ),
+                        "vs_SPY_%": round(float(r.get("rs", 0)) * 100, 2),
                         "security_type": ref.get(
                             "security_type",
                             "Common-stock candidate",
                         ),
-                        "type_check": "PASS",
-                        "price_check": "PASS",
-                        "liquidity_check": "PASS",
                         "decision": decision_reason,
-                        "intraday_reasons": (
-                            "; ".join(
-                                reasons
-                            )
-                        ),
+                        "intraday_reasons": "; ".join(reasons),
                     }
                 )
 
-            out = pd.DataFrame(
-                rows
-            )
-
-            progress.progress(
-                100
-            )
-
+            out = pd.DataFrame(rows)
+            progress.progress(100)
             status.update(
-                label=(
-                    "Swing scan complete."
-                ),
+                label="Swing scan complete.",
                 state="complete",
                 expanded=False,
             )
 
             if out.empty:
-
-                st.warning(
-                    "No finalists had enough data to score."
-                )
-
+                st.warning("No finalists had enough data to score.")
             else:
-
                 rank = {
                     "A+ SWING BUY": 0,
                     "BUY": 1,
@@ -1607,570 +689,245 @@ with tab1:
                     "N/A": 6,
                 }
 
-                out[
-                    "_rank"
-                ] = (
-                    out[
-                        "signal"
-                    ]
-                    .map(
-                        rank
-                    )
-                    .fillna(
-                        6
-                    )
-                )
+                out["_rank"] = out["signal"].map(rank).fillna(6)
+                out = out.sort_values(
+                    [
+                        "_rank",
+                        "swing_score",
+                        "entry_quality",
+                        "intraday_score",
+                    ],
+                    ascending=[True, False, False, False],
+                ).drop(columns="_rank")
 
-                out = (
-                    out
-                    .sort_values(
-                        [
-                            "_rank",
-                            "swing_score",
-                            "entry_quality",
-                            "intraday_score",
-                        ],
-                        ascending=[
-                            True,
-                            False,
-                            False,
-                            False,
-                        ],
-                    )
-                    .drop(
-                        columns="_rank"
-                    )
-                )
+                buys = out[out["signal"].isin(["A+ SWING BUY", "BUY"])]
+                watches = out[out["signal"] == "WATCH"]
+                extended = out[out["signal"] == "TOO EXTENDED"]
 
-                buys = out[
-                    out[
-                        "signal"
-                    ].isin(
-                        [
-                            "A+ SWING BUY",
-                            "BUY",
-                        ]
-                    )
-                ]
-
-                watches = out[
-                    out[
-                        "signal"
-                    ]
-                    == "WATCH"
-                ]
-
-                extended = out[
-                    out[
-                        "signal"
-                    ]
-                    == "TOO EXTENDED"
-                ]
-
-                if (
-                    sms_enabled
-                    and sms_configured()
-                ):
-
+                if sms_enabled and sms_configured():
                     sent = []
 
-                    if (
-                        sms_buy_enabled
-                        and not buys.empty
-                    ):
-
-                        for (
-                            _,
-                            alert_row,
-                        ) in (
-                            buys
-                            .head(
-                                5
-                            )
-                            .iterrows()
-                        ):
-
+                    if sms_buy_enabled and not buys.empty:
+                        for _, alert_row in buys.head(5).iterrows():
                             try:
-
-                                send_sms(
-                                    build_buy_message(
-                                        alert_row
-                                    )
-                                )
-
-                                sent.append(
-                                    f"BUY "
-                                    f"{alert_row['symbol']}"
-                                )
-
+                                send_sms(build_buy_message(alert_row))
+                                sent.append(f"BUY {alert_row['symbol']}")
                             except Exception as sms_error:
-
                                 st.warning(
                                     f"Could not text BUY alert for "
-                                    f"{alert_row['symbol']}: "
-                                    f"{sms_error}"
+                                    f"{alert_row['symbol']}: {sms_error}"
                                 )
 
                     held = {
                         x.strip().upper()
-                        for x
-                        in tracked_positions.split(
-                            ","
-                        )
+                        for x in tracked_positions.split(",")
                         if x.strip()
                     }
 
-                    if (
-                        sms_sell_enabled
-                        and held
-                    ):
+                    if sms_sell_enabled and held:
+                        held_rows = out[out["symbol"].isin(held)]
 
-                        held_rows = out[
-                            out[
-                                "symbol"
-                            ].isin(
-                                held
-                            )
-                        ]
-
-                        for (
-                            _,
-                            alert_row,
-                        ) in held_rows.iterrows():
-
+                        for _, alert_row in held_rows.iterrows():
                             sell_reasons = []
 
-                            current_price = float(
-                                alert_row[
-                                    "price"
-                                ]
-                            )
-
-                            current_vwap = float(
-                                alert_row[
-                                    "vwap"
-                                ]
-                            )
-
+                            current_price = safe_float(alert_row.get("price"))
+                            current_vwap = safe_float(alert_row.get("vwap"))
                             current_intraday_score = int(
-                                alert_row[
-                                    "intraday_score"
-                                ]
+                                safe_float(alert_row.get("intraday_score"))
+                            )
+                            current_intraday_signal = alert_row.get(
+                                "intraday_signal",
+                                "",
                             )
 
-                            current_intraday_signal = (
-                                alert_row[
-                                    "intraday_signal"
-                                ]
-                            )
+                            if current_price < current_vwap:
+                                sell_reasons.append("price below VWAP")
 
-                            if (
-                                current_price
-                                < current_vwap
-                            ):
-
+                            if current_intraday_score < 60:
                                 sell_reasons.append(
-                                    "price below VWAP"
-                                )
-
-                            if (
-                                current_intraday_score
-                                < 60
-                            ):
-
-                                sell_reasons.append(
-                                    f"intraday score fell to "
-                                    f"{current_intraday_score}"
+                                    f"intraday score fell to {current_intraday_score}"
                                 )
 
                             sell_risk = (
-                                current_intraday_signal
-                                in [
-                                    "AVOID",
-                                    "NO BUY",
-                                ]
-                                and sell_reasons
+                                current_intraday_signal in {"AVOID", "NO BUY"}
+                                and bool(sell_reasons)
                             )
 
                             if sell_risk:
-
                                 try:
-
                                     send_sms(
                                         build_sell_message(
-                                            alert_row[
-                                                "symbol"
-                                            ],
-                                            alert_row[
-                                                "price"
-                                            ],
-                                            ", ".join(
-                                                sell_reasons
-                                            ),
+                                            alert_row["symbol"],
+                                            alert_row["price"],
+                                            ", ".join(sell_reasons),
                                         )
                                     )
-
                                     sent.append(
-                                        f"SELL-RISK "
-                                        f"{alert_row['symbol']}"
+                                        f"SELL-RISK {alert_row['symbol']}"
                                     )
-
                                 except Exception as sms_error:
-
                                     st.warning(
                                         f"Could not text SELL alert for "
-                                        f"{alert_row['symbol']}: "
-                                        f"{sms_error}"
+                                        f"{alert_row['symbol']}: {sms_error}"
                                     )
 
                     if sent:
-
-                        st.info(
-                            "Text alerts sent: "
-                            + ", ".join(
-                                sent
-                            )
-                        )
+                        st.info("Text alerts sent: " + ", ".join(sent))
 
                 st.divider()
-
-                st.subheader(
-                    "Current Market Decision"
-                )
+                st.subheader("Current Market Decision")
 
                 if not buys.empty:
-
                     st.success(
-                        f"🟢 {len(buys)} CONFIRMED SWING BUY "
+                        f"ð¢ {len(buys)} CONFIRMED SWING BUY "
                         f"{'SIGNAL' if len(buys) == 1 else 'SIGNALS'}"
                     )
-
-                    st.write(
-                        ", ".join(
-                            buys[
-                                "symbol"
-                            ].head(
-                                8
-                            )
-                        )
-                    )
-
+                    st.write(", ".join(buys["symbol"].head(8)))
                 else:
-
-                    st.error(
-                        "🔴 NO CONFIRMED SWING BUY RIGHT NOW"
-                    )
-
+                    st.error("ð´ NO CONFIRMED SWING BUY RIGHT NOW")
                     st.caption(
-                        "Do not buy simply because a stock has a high "
-                        "Swing Score. Wait until the scanner changes "
-                        "the signal to BUY or A+ SWING BUY."
+                        "Do not buy simply because a stock has a high Swing Score. "
+                        "Wait until the scanner changes the signal to BUY or A+ SWING BUY."
                     )
 
-                m1, m2 = st.columns(
-                    2
-                )
-
-                m1.metric(
-                    "Finalists",
-                    len(
-                        out
-                    ),
-                )
-
-                m2.metric(
-                    "Confirmed BUYs",
-                    len(
-                        buys
-                    ),
-                )
-
-                m3, m4 = st.columns(
-                    2
-                )
-
-                m3.metric(
-                    "WATCH",
-                    len(
-                        watches
-                    ),
-                )
-
-                m4.metric(
-                    "TOO EXTENDED",
-                    len(
-                        extended
-                    ),
-                )
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Finalists", len(out))
+                m2.metric("Confirmed BUYs", len(buys))
+                m3.metric("WATCH", len(watches))
+                m4.metric("TOO EXTENDED", len(extended))
 
                 st.divider()
-
-                st.header(
-                    "Top 5 Swing Opportunities"
-                )
-
+                st.header("Top 5 Swing Opportunities")
                 st.caption(
-                    "These are ranked setups. WATCH means wait — "
-                    "it does not mean buy now."
+                    "These are ranked setups. WATCH means wait â it does not mean buy now."
                 )
 
-                top_opportunities = (
-                    out.head(
-                        5
-                    )
-                )
-
-                for (
-                    rank_num,
-                    (
-                        _,
-                        row,
-                    ),
-                ) in enumerate(
-                    top_opportunities.iterrows(),
+                for rank_num, (_, row) in enumerate(
+                    out.head(5).iterrows(),
                     start=1,
                 ):
-
-                    render_trade_card(
-                        row,
-                        rank_num,
-                    )
+                    render_trade_card(row, rank_num)
 
                 st.divider()
-
-                st.header(
-                    "🟢 Confirmed BUY Signals"
-                )
-
-                if not buys.empty:
-
-                    for (
-                        _,
-                        row,
-                    ) in (
-                        buys
-                        .head(
-                            10
-                        )
-                        .iterrows()
-                    ):
-
-                        render_trade_card(
-                            row
-                        )
-
+                st.header("ð¢ Confirmed BUY Signals")
+                if buys.empty:
+                    st.info("No confirmed BUY signals right now.")
                 else:
-
-                    st.info(
-                        "No confirmed BUY signals right now."
-                    )
+                    for _, row in buys.head(10).iterrows():
+                        render_trade_card(row)
 
                 st.divider()
-
-                st.header(
-                    "🔴 Strong But Too Extended"
-                )
-
-                st.caption(
-                    "These may be good stocks but the current entry "
-                    "is too stretched. Wait for a pullback or retest."
-                )
-
-                if not extended.empty:
-
-                    for (
-                        _,
-                        row,
-                    ) in (
-                        extended
-                        .head(
-                            5
-                        )
-                        .iterrows()
-                    ):
-
-                        render_trade_card(
-                            row
-                        )
-
+                st.header("ð´ Strong But Too Extended")
+                if extended.empty:
+                    st.write("None.")
                 else:
-
-                    st.write(
-                        "None."
-                    )
+                    for _, row in extended.head(5).iterrows():
+                        render_trade_card(row)
 
                 st.divider()
-
-                st.header(
-                    "🟡 WATCH List"
-                )
-
-                watch_columns = [
-                    "symbol",
-                    "signal",
-                    "swing_score",
-                    "setup",
-                    "price",
-                    "entry_low",
-                    "entry_high",
-                ]
-
-                if not watches.empty:
-
+                st.header("ð¡ WATCH List")
+                if watches.empty:
+                    st.write("None.")
+                else:
+                    watch_columns = [
+                        c
+                        for c in [
+                            "symbol",
+                            "signal",
+                            "swing_score",
+                            "setup",
+                            "price",
+                            "entry_low",
+                            "entry_high",
+                        ]
+                        if c in watches.columns
+                    ]
                     st.dataframe(
-                        watches[
-                            watch_columns
-                        ].head(
-                            30
-                        ),
+                        watches[watch_columns].head(30),
                         width="stretch",
                         hide_index=True,
                     )
 
-                else:
-
-                    st.write(
-                        "None."
-                    )
-
                 st.divider()
-
-                st.header(
-                    "Stock Detail"
+                st.header("Stock Detail")
+                selected_symbol = st.selectbox(
+                    "Select a stock",
+                    out["symbol"].tolist(),
                 )
-
-                selected_symbol = (
-                    st.selectbox(
-                        "Select a stock",
-                        out[
-                            "symbol"
-                        ].tolist(),
-                    )
-                )
-
-                selected = out[
-                    out[
-                        "symbol"
-                    ]
-                    == selected_symbol
-                ].iloc[
-                    0
-                ]
-
-                render_trade_card(
-                    selected
-                )
+                selected = out[out["symbol"] == selected_symbol].iloc[0]
+                render_trade_card(selected)
 
                 st.write(
-                    f"**Today's change:** "
-                    f"{selected['change_today_%']:.2f}%"
+                    f"**Today's change:** {safe_float(selected.get('change_today_%')):.2f}%"
                 )
-
                 st.write(
-                    f"**Relative volume:** "
-                    f"{selected['rel_volume']:.2f}x"
+                    f"**Relative volume:** {safe_float(selected.get('rel_volume')):.2f}x"
                 )
-
                 st.write(
                     f"**Relative strength vs SPY:** "
-                    f"{selected['vs_SPY_%']:.2f}%"
+                    f"{safe_float(selected.get('vs_SPY_%')):.2f}%"
                 )
-
                 st.write(
-                    f"**Decision reason:** "
-                    f"{selected['decision']}"
+                    f"**Decision reason:** {selected.get('decision', '')}"
                 )
 
-                st.divider()
-
-                with st.expander(
-                    "Show full research table"
-                ):
-
+                with st.expander("Show full research table"):
                     display_columns = [
-                        "symbol",
-                        "name",
-                        "signal",
-                        "swing_score",
-                        "setup",
-                        "entry_quality",
-                        "price",
-                        "entry_low",
-                        "entry_high",
-                        "stop",
-                        "target1",
-                        "target2",
-                        "reward_risk",
-                        "risk_flag",
-                        "risk_reason",
-                        "gap_down_pct",
-                        "event_days_ago",
-                        "trend_health",
-                        "distribution_days",
-                        "leadership_percentile",
-                        "market_score",
-                        "intraday_confirmed",
-                        "intraday_signal",
-                        "intraday_score",
-                        "change_today_%",
-                        "rel_volume",
-                        "vs_SPY_%",
-                        "decision",
-                    ]
-
-                    available_columns = [
-                        col
-                        for col
-                        in display_columns
-                        if col
-                        in out.columns
+                        c
+                        for c in [
+                            "symbol",
+                            "name",
+                            "signal",
+                            "swing_score",
+                            "setup",
+                            "entry_quality",
+                            "price",
+                            "entry_low",
+                            "entry_high",
+                            "stop",
+                            "target1",
+                            "target2",
+                            "reward_risk",
+                            "risk_flag",
+                            "risk_reason",
+                            "gap_down_pct",
+                            "event_days_ago",
+                            "trend_health",
+                            "distribution_days",
+                            "leadership_percentile",
+                            "market_score",
+                            "intraday_confirmed",
+                            "intraday_signal",
+                            "intraday_score",
+                            "change_today_%",
+                            "rel_volume",
+                            "vs_SPY_%",
+                            "decision",
+                        ]
+                        if c in out.columns
                     ]
 
                     st.dataframe(
-                        out[
-                            available_columns
-                        ].head(
-                            50
-                        ),
+                        out[display_columns].head(50),
                         width="stretch",
                         hide_index=True,
                     )
 
                 st.download_button(
                     "Download latest swing scan",
-                    data=(
-                        out.to_csv(
-                            index=False
-                        )
-                        .encode(
-                            "utf-8"
-                        )
-                    ),
-                    file_name=(
-                        "swing_scan_latest.csv"
-                    ),
+                    data=out.to_csv(index=False).encode("utf-8"),
+                    file_name="v3_4_swing_scan_latest.csv",
                     mime="text/csv",
                     width="stretch",
                 )
 
         except Exception as e:
-
             status.update(
-                label=(
-                    "Scan stopped because of an error."
-                ),
+                label="Scan stopped because of an error.",
                 state="error",
             )
-
-            st.error(
-                str(
-                    e
-                )
-            )
-
-            st.info(
-                "If SIP entitlement is mentioned, choose IEX."
-            )
+            st.error(str(e))
+            st.info("If SIP entitlement is mentioned, choose IEX.")
 
 
 # ============================================================
@@ -2178,48 +935,33 @@ with tab1:
 # ============================================================
 
 with tab2:
-
-    st.subheader(
-        "$2,000 Production-Equivalent Swing Backtester"
-    )
+    st.subheader("$2,000 Production-Equivalent Swing Backtester")
 
     st.info(
-        "This version runs the same daily score, market-regime rules, "
-        "leadership gate, catalyst protection and intraday confirmation used "
-        "by the live scanner. A signal is evaluated at the selected time and "
-        "filled no earlier than the following minute."
+        "The production run uses the same daily score, market-regime rules, "
+        "leadership gate, catalyst protection and intraday confirmation used by "
+        "the live scanner. v3.4 can then run bounded alternate threshold profiles "
+        "through the actual portfolio simulator for research only."
     )
 
     st.warning(
         "Important limitation: results cover only the symbols entered below. "
-        "They do not yet reconstruct the entire historical U.S. market or "
-        "remove survivorship bias. Treat the results as research, not proof "
+        "They do not reconstruct the entire historical U.S. market or remove "
+        "survivorship bias. Calibration results are research evidence, not proof "
         "of future profitability."
     )
 
-    c1, c2, c3 = st.columns(
-        3
-    )
+    c1, c2, c3 = st.columns(3)
 
     start_date = c1.date_input(
         "Start",
-        datetime.now(
-            ET
-        ).date()
-        - timedelta(
-            days=180
-        ),
+        datetime.now(ET).date() - timedelta(days=180),
         key="swing_bt_start",
     )
 
     end_date = c2.date_input(
         "End",
-        datetime.now(
-            ET
-        ).date()
-        - timedelta(
-            days=1
-        ),
+        datetime.now(ET).date() - timedelta(days=1),
         key="swing_bt_end",
     )
 
@@ -2235,9 +977,7 @@ with tab2:
         / 100
     )
 
-    c4, c5, c6 = st.columns(
-        3
-    )
+    c4, c5, c6 = st.columns(3)
 
     max_positions = c4.slider(
         "Maximum open positions",
@@ -2259,18 +999,12 @@ with tab2:
 
     scan_time = c6.selectbox(
         "Historical scan time (ET)",
-        [
-            "11:30",
-            "14:00",
-            "15:30",
-        ],
+        ["11:30", "14:00", "15:30"],
         index=0,
         key="swing_bt_time",
     )
 
-    c7, c8 = st.columns(
-        2
-    )
+    c7, c8 = st.columns(2)
 
     slippage_bps = c7.slider(
         "Estimated slippage (basis points per order)",
@@ -2298,102 +1032,82 @@ with tab2:
         ),
         key="swing_bt_symbols",
         help=(
-            "Use at least 10 liquid stocks. Relative-strength percentiles "
-            "are calculated inside this comparison group."
+            "Use at least 10 liquid stocks. Relative-strength percentiles are "
+            "calculated inside this comparison group."
         ),
     )
 
     btfeed = st.selectbox(
         "Backtest data feed",
-        [
-            "iex",
-            "sip",
-        ],
+        ["iex", "sip"],
         index=0,
         key="swing_bt_feed",
     )
 
     st.caption(
-        "IEX is suitable for testing but contains only one exchange. "
-        "Use SIP when your Alpaca plan permits it."
+        "IEX contains only one exchange. Use SIP when your Alpaca plan permits "
+        "consolidated market data."
     )
 
-    if st.button(
-        "RUN $2,000 BACKTEST",
-        type="primary",
-        width="stretch",
-    ):
+    st.divider()
 
+    run_v34_calibration = st.checkbox(
+        "Run v3.4 adaptive calibration after this backtest",
+        value=True,
+        help=(
+            "Runs a bounded set of alternate score thresholds through the actual "
+            "portfolio simulator. This is slower and never changes live rules."
+        ),
+        key="v34_calibration_enabled",
+    )
+
+    calibration_profiles = st.slider(
+        "Maximum calibration profiles",
+        6,
+        16,
+        10,
+        1,
+        key="v34_calibration_profiles",
+        help="More profiles = broader research but longer runtime.",
+    )
+
+    if st.button("RUN $2,000 BACKTEST", type="primary", width="stretch"):
         syms = [
             x.strip().upper()
-            for x
-            in symbols.split(
-                ","
-            )
+            for x in symbols.split(",")
             if x.strip()
         ]
 
-        if (
-            start_date
-            >= end_date
-        ):
-
-            st.error(
-                "Choose a start date before the end date."
-            )
-
+        if start_date >= end_date:
+            st.error("Choose a start date before the end date.")
             st.stop()
 
-        if (
-            end_date
-            - start_date
-        ).days > 365:
-
+        if (end_date - start_date).days > 365:
             st.warning(
-                "A range longer than one year can be slow or exceed the "
-                "minute-data limit. Start with 6–12 months, then test "
-                "additional non-overlapping periods."
+                "A range longer than one year can be slow or exceed the minute-data "
+                "limit. Start with 6â12 months, then test additional non-overlapping periods."
             )
 
-        if len(
-            syms
-        ) < 5:
-
+        if len(syms) < 5:
             st.error(
-                "Enter at least 5 symbols so the relative-strength ranking "
-                "has a meaningful comparison group."
+                "Enter at least 5 symbols so relative-strength ranking has a "
+                "meaningful comparison group."
             )
-
             st.stop()
 
-        if len(
-            syms
-        ) < 10:
-
+        if len(syms) < 10:
             st.warning(
-                "Fewer than 10 symbols can make leadership percentiles "
-                "unstable. Ten or more is recommended."
+                "Fewer than 10 symbols can make leadership percentiles unstable. "
+                "Ten or more is recommended."
             )
 
-        request_end = (
-            end_date
-            + timedelta(
-                days=1
-            )
-        )
-
-        warmup_start = (
-            start_date
-            - timedelta(
-                days=450
-            )
-        )
+        request_end = end_date + timedelta(days=1)
+        warmup_start = start_date - timedelta(days=450)
 
         with st.spinner(
             "Downloading daily and minute history, rebuilding each signal "
             "and simulating the portfolio..."
         ):
-
             bars = get_bars_batched(
                 syms,
                 start_date,
@@ -2405,10 +1119,7 @@ with tab2:
             )
 
             market_minutes = get_bars(
-                [
-                    "SPY",
-                    "QQQ",
-                ],
+                ["SPY", "QQQ"],
                 start_date,
                 request_end,
                 "1Min",
@@ -2426,10 +1137,7 @@ with tab2:
             )
 
             market_daily = get_bars(
-                [
-                    "SPY",
-                    "QQQ",
-                ],
+                ["SPY", "QQQ"],
                 warmup_start,
                 request_end,
                 "1Day",
@@ -2437,29 +1145,14 @@ with tab2:
             )
 
             if market_minutes.empty:
-
-                spy = (
-                    pd.DataFrame()
-                )
-
-                qqq = (
-                    pd.DataFrame()
-                )
-
+                spy = pd.DataFrame()
+                qqq = pd.DataFrame()
             else:
-
                 spy = market_minutes[
-                    market_minutes[
-                        "symbol"
-                    ]
-                    == "SPY"
+                    market_minutes["symbol"] == "SPY"
                 ].copy()
-
                 qqq = market_minutes[
-                    market_minutes[
-                        "symbol"
-                    ]
-                    == "QQQ"
+                    market_minutes["symbol"] == "QQQ"
                 ].copy()
 
         if (
@@ -2468,117 +1161,81 @@ with tab2:
             or qqq.empty
             or daily_history.empty
             or market_daily.empty
-            or not {
-                "SPY",
-                "QQQ",
-            }.issubset(
-                set(
-                    market_daily[
-                        "symbol"
-                    ]
-                )
-            )
+            or not {"SPY", "QQQ"}.issubset(set(market_daily["symbol"]))
         ):
-
             st.error(
-                "The complete daily and minute history was not returned. "
-                "Try a shorter date range or choose IEX if SIP entitlement "
-                "was rejected."
+                "The complete daily and minute history was not returned. Try a "
+                "shorter date range or choose IEX if SIP entitlement was rejected."
             )
-
         else:
-
             complete_symbols = sorted(
-                set(
-                    bars[
-                        "symbol"
-                    ]
-                )
-                & set(
-                    daily_history[
-                        "symbol"
-                    ]
-                )
+                set(bars["symbol"]) & set(daily_history["symbol"])
             )
 
-            missing_symbols = sorted(
-                set(
-                    syms
-                )
-                - set(
-                    complete_symbols
-                )
-            )
+            missing_symbols = sorted(set(syms) - set(complete_symbols))
 
             if missing_symbols:
-
                 st.warning(
                     "Excluded symbols with incomplete daily or minute data: "
-                    + ", ".join(
-                        missing_symbols
-                    )
+                    + ", ".join(missing_symbols)
                 )
 
-            if len(
-                complete_symbols
-            ) < 5:
-
+            if len(complete_symbols) < 5:
                 st.error(
-                    "Fewer than 5 symbols returned complete data. "
-                    "Choose a shorter date range or a different feed."
+                    "Fewer than 5 symbols returned complete data. Choose a shorter "
+                    "date range or a different feed."
                 )
-
                 st.stop()
 
-            bars = bars[
-                bars[
-                    "symbol"
-                ].isin(
-                    complete_symbols
-                )
+            bars = bars[bars["symbol"].isin(complete_symbols)].copy()
+            daily_history = daily_history[
+                daily_history["symbol"].isin(complete_symbols)
             ].copy()
 
-            daily_history = (
-                daily_history[
-                    daily_history[
-                        "symbol"
-                    ].isin(
-                        complete_symbols
+            with st.spinner("Running production 85/85 backtest..."):
+                res = swing_backtest(
+                    bars,
+                    spy,
+                    qqq_bars=qqq,
+                    daily_bars=daily_history,
+                    market_daily_bars=market_daily,
+                    starting_capital=2000,
+                    risk_pct=risk_pct,
+                    max_positions=max_positions,
+                    max_holding_days=max_holding_days,
+                    scan_time=scan_time,
+                    slippage_bps=slippage_bps,
+                    commission_bps=commission_bps,
+                )
+
+            if run_v34_calibration:
+                with st.spinner(
+                    "Running v3.4 adaptive threshold calibration using the same "
+                    "historical data..."
+                ):
+                    calibration_result = calibrate_thresholds_adaptive(
+                        bars,
+                        spy,
+                        qqq_bars=qqq,
+                        daily_bars=daily_history,
+                        market_daily_bars=market_daily,
+                        starting_capital=2000,
+                        risk_pct=risk_pct,
+                        max_positions=max_positions,
+                        max_holding_days=max_holding_days,
+                        scan_time=scan_time,
+                        slippage_bps=slippage_bps,
+                        commission_bps=commission_bps,
+                        production_result=res,
+                        max_profiles=calibration_profiles,
                     )
-                ].copy()
-            )
+                    res["calibration_result"] = calibration_result
 
-            res = swing_backtest(
-                bars,
-                spy,
-                qqq_bars=qqq,
-                daily_bars=daily_history,
-                market_daily_bars=market_daily,
-                starting_capital=2000,
-                risk_pct=risk_pct,
-                max_positions=max_positions,
-                max_holding_days=max_holding_days,
-                scan_time=scan_time,
-                slippage_bps=slippage_bps,
-                commission_bps=commission_bps,
-            )
-
-            st.session_state.latest_backtest_result = (
-                res
-            )
-
+            st.session_state.latest_backtest_result = res
             st.session_state.latest_backtest_settings = {
-                "symbols": (
-                    ",".join(
-                        complete_symbols
-                    )
-                ),
-                "start": str(
-                    start_date
-                ),
-                "end": str(
-                    end_date
-                ),
+                "symbols": ",".join(complete_symbols),
+                "start": str(start_date),
+                "end": str(end_date),
                 "risk_pct": risk_pct,
                 "max_positions": max_positions,
                 "max_holding_days": max_holding_days,
@@ -2586,153 +1243,60 @@ with tab2:
                 "slippage_bps": slippage_bps,
                 "commission_bps": commission_bps,
                 "feed": btfeed,
+                "v3_4_calibration": run_v34_calibration,
+                "calibration_profiles": calibration_profiles,
             }
 
-            stats = res[
-                "stats"
-            ]
+            stats = res.get("stats", {})
 
-            cols = st.columns(
-                4
+            cols = st.columns(4)
+            cols[0].metric("Ending $", stats.get("ending_capital", "â"))
+            cols[1].metric("Return %", stats.get("total_return_pct", "â"))
+            cols[2].metric("Win rate %", stats.get("win_rate_pct", "â"))
+            cols[3].metric("Profit factor", stats.get("profit_factor", "â"))
+
+            cols2 = st.columns(4)
+            cols2[0].metric("Max DD %", stats.get("max_drawdown_pct", "â"))
+            cols2[1].metric("Trades", stats.get("trades", "â"))
+            cols2[2].metric(
+                "Average expectancy (R)",
+                stats.get("expectancy_r", "â"),
+            )
+            cols2[3].metric(
+                "Average trade $",
+                stats.get("avg_trade_dollars", "â"),
             )
 
-            labels = [
-                (
-                    "ending_capital",
-                    "Ending $",
-                ),
-                (
-                    "total_return_pct",
-                    "Return %",
-                ),
-                (
-                    "win_rate_pct",
-                    "Win rate %",
-                ),
-                (
-                    "profit_factor",
-                    "Profit factor",
-                ),
-            ]
+            for warning in res.get("warnings", []):
+                st.warning(warning)
 
-            for (
-                col,
-                (
-                    key,
-                    label,
-                ),
-            ) in zip(
-                cols,
-                labels,
-            ):
-
-                col.metric(
-                    label,
-                    stats.get(
-                        key,
-                        "—",
-                    ),
-                )
-
-            cols2 = st.columns(
-                4
-            )
-
-            labels2 = [
-                (
-                    "max_drawdown_pct",
-                    "Max DD %",
-                ),
-                (
-                    "trades",
-                    "Trades",
-                ),
-                (
-                    "expectancy_r",
-                    "Average expectancy (R)",
-                ),
-                (
-                    "avg_trade_dollars",
-                    "Average trade $",
-                ),
-            ]
-
-            for (
-                col,
-                (
-                    key,
-                    label,
-                ),
-            ) in zip(
-                cols2,
-                labels2,
-            ):
-
-                col.metric(
-                    label,
-                    stats.get(
-                        key,
-                        "—",
-                    ),
-                )
-
-            for warning in res.get(
-                "warnings",
-                [],
-            ):
-
-                st.warning(
-                    warning
-                )
-
-            if stats.get(
-                "trades",
-                0,
-            ) == 0:
-
+            if stats.get("trades", 0) == 0:
                 st.info(
-                    "No fully confirmed BUY signals became trades during "
-                    "this period. That is a valid result; try a longer "
-                    "period before changing the strategy rules."
+                    "The production 85/85 rules produced no completed trades in "
+                    "this sample. v3.4 calibration can still test bounded research "
+                    "profiles without changing the live scanner."
                 )
 
-            diagnostics = res.get(
-                "diagnostics",
-                {},
-            )
-
-            funnel = diagnostics.get(
-                "funnel",
-                pd.DataFrame(),
-            )
-
+            diagnostics = res.get("diagnostics", {})
+            funnel = diagnostics.get("funnel", pd.DataFrame())
             gate_failures = diagnostics.get(
                 "gate_failures",
                 pd.DataFrame(),
             )
-
             near_misses = diagnostics.get(
                 "near_misses",
                 pd.DataFrame(),
             )
 
-            st.subheader(
-                "BUY confirmation funnel"
-            )
-
+            st.subheader("BUY confirmation funnel")
             st.caption(
-                "This shows where historical candidates stopped progressing. "
-                "It does not loosen any BUY rule or predict a future win rate."
+                "Shows where historical candidates stop progressing under the "
+                "production rules."
             )
 
             if funnel.empty:
-
-                st.info(
-                    "No candidates were available for gate diagnostics."
-                )
-
+                st.info("No candidates were available for gate diagnostics.")
             else:
-
                 st.dataframe(
                     funnel,
                     width="stretch",
@@ -2740,105 +1304,60 @@ with tab2:
                 )
 
             if not gate_failures.empty:
-
-                primary = (
-                    gate_failures.iloc[
-                        0
-                    ]
-                )
-
+                primary = gate_failures.iloc[0]
                 st.info(
-                    f"Most frequently failed gate: "
-                    f"{primary['gate']} failed for "
+                    f"Most frequently failed gate: {primary['gate']} failed for "
                     f"{int(primary['failed'])} candidates "
                     f"({float(primary['failure_percent']):.1f}%)."
                 )
 
-                st.markdown(
-                    "#### Most common failed BUY gates"
-                )
-
+                st.markdown("#### Most common failed BUY gates")
                 st.dataframe(
-                    gate_failures.head(
-                        8
-                    ),
+                    gate_failures.head(8),
                     width="stretch",
                     hide_index=True,
                 )
 
-            st.markdown(
-                "#### Closest near misses"
-            )
-
+            st.markdown("#### Closest near misses")
             st.caption(
-                "One best non-BUY observation per symbol, ranked by the "
-                "fewest failed gates. A near miss is not a recommendation."
+                "One best non-BUY observation per symbol, ranked by the fewest "
+                "failed gates. A near miss is not a recommendation."
             )
 
             if near_misses.empty:
-
-                st.info(
-                    "No non-BUY candidates were available to rank."
-                )
-
+                st.info("No non-BUY candidates were available to rank.")
             else:
-
-                for (
-                    _,
-                    near_miss,
-                ) in near_misses.head(
-                    5
-                ).iterrows():
-
-                    with st.container(
-                        border=True
-                    ):
-
+                for _, near_miss in near_misses.head(5).iterrows():
+                    with st.container(border=True):
                         st.markdown(
-                            f"**{near_miss['symbol']} — "
-                            f"{near_miss['signal']}**"
+                            f"**{near_miss['symbol']} â {near_miss['signal']}**"
                         )
-
                         st.write(
-                            f"Session: "
-                            f"{near_miss['session']} • "
-                            f"Gates passed: "
-                            f"{near_miss['gates_passed']}"
+                            f"Session: {near_miss['session']} â¢ "
+                            f"Gates passed: {near_miss['gates_passed']}"
                         )
-
                         st.write(
-                            f"Swing Score: "
-                            f"{float(near_miss['swing_score']):.1f} • "
-                            f"Intraday Score: "
-                            f"{float(near_miss['intraday_score']):.1f} • "
-                            f"Entry Quality: "
-                            f"{float(near_miss['entry_quality']):.1f}/15"
+                            f"Swing Score: {float(near_miss['swing_score']):.1f} â¢ "
+                            f"Intraday Score: {float(near_miss['intraday_score']):.1f} â¢ "
+                            f"Entry Quality: {float(near_miss['entry_quality']):.1f}/15"
                         )
-
                         st.warning(
                             "Failed BUY gates: "
                             f"{near_miss['failed_buy_gates']}"
                         )
 
-                with st.expander(
-                    "Show full near-miss table"
-                ):
-
+                with st.expander("Show full near-miss table"):
                     st.dataframe(
                         near_misses,
                         width="stretch",
                         hide_index=True,
                     )
 
-            if not res[
-                "equity"
-            ].empty:
-
+            equity = res.get("equity", pd.DataFrame())
+            if not equity.empty:
                 st.plotly_chart(
                     px.line(
-                        res[
-                            "equity"
-                        ],
+                        equity,
                         x="date",
                         y="equity",
                         title="$2,000 Equity Curve",
@@ -2846,83 +1365,103 @@ with tab2:
                     width="stretch",
                 )
 
-            st.subheader(
-                "Simulated trades"
-            )
-
+            st.subheader("Simulated production trades")
+            trades = res.get("trades", pd.DataFrame())
             st.dataframe(
-                res[
-                    "trades"
-                ],
+                trades,
                 width="stretch",
                 hide_index=True,
             )
 
-            if not res[
-                "trades"
-            ].empty:
-
+            if not trades.empty:
                 st.download_button(
                     "Download simulated trades",
-                    data=(
-                        res[
-                            "trades"
-                        ]
-                        .to_csv(
-                            index=False
-                        )
-                        .encode(
-                            "utf-8"
-                        )
-                    ),
-                    file_name=(
-                        "v3_3_swing_backtest_trades.csv"
-                    ),
+                    data=trades.to_csv(index=False).encode("utf-8"),
+                    file_name="v3_4_swing_backtest_trades.csv",
                     mime="text/csv",
                     width="stretch",
                 )
 
-            with st.expander(
-                "Show historical signal audit"
-            ):
-
+            with st.expander("Show historical signal audit"):
+                signal_log = res.get("signal_log", pd.DataFrame())
                 st.caption(
-                    "This table records each reconstructed daily and "
-                    "intraday decision, including signals that never became "
-                    "a trade."
+                    "Records each reconstructed daily and intraday decision, "
+                    "including signals that never became a trade."
                 )
-
                 st.dataframe(
-                    res[
-                        "signal_log"
-                    ],
+                    signal_log,
                     width="stretch",
                     hide_index=True,
                 )
 
-                if not res[
-                    "signal_log"
-                ].empty:
-
+                if not signal_log.empty:
                     st.download_button(
                         "Download signal audit",
-                        data=(
-                            res[
-                                "signal_log"
-                            ]
-                            .to_csv(
-                                index=False
-                            )
-                            .encode(
-                                "utf-8"
-                            )
-                        ),
-                        file_name=(
-                            "v3_3_signal_audit.csv"
-                        ),
+                        data=signal_log.to_csv(index=False).encode("utf-8"),
+                        file_name="v3_4_signal_audit.csv",
                         mime="text/csv",
                         width="stretch",
                     )
+
+            if run_v34_calibration and res.get("calibration_result"):
+                cal = res["calibration_result"]
+                comparison = cal.get("comparison", pd.DataFrame())
+
+                st.divider()
+                st.subheader("v3.4 Calibration Snapshot")
+
+                if comparison.empty:
+                    st.info("Calibration completed but returned no comparison rows.")
+                else:
+                    display_cols = [
+                        c
+                        for c in [
+                            "profile",
+                            "production_rules",
+                            "swing_score_gate",
+                            "intraday_score_gate",
+                            "entry_quality_gate",
+                            "leadership_gate",
+                            "trades",
+                            "win_rate_pct",
+                            "expectancy_r",
+                            "profit_factor",
+                            "return_pct",
+                            "max_drawdown_pct",
+                            "out_of_sample_trades",
+                            "out_of_sample_win_rate_pct",
+                            "out_of_sample_expectancy_r",
+                            "out_of_sample_profit_factor",
+                            "bootstrap_expectancy_low_r",
+                            "confidence_grade",
+                            "validation_pass",
+                            "research_eligible",
+                            "promotion_candidate",
+                            "research_score",
+                        ]
+                        if c in comparison.columns
+                    ]
+
+                    st.dataframe(
+                        comparison[display_cols],
+                        width="stretch",
+                        hide_index=True,
+                    )
+
+                    if (
+                        "promotion_candidate" in comparison.columns
+                        and comparison["promotion_candidate"].fillna(False).any()
+                    ):
+                        st.warning(
+                            "One or more research profiles met the v3.4 review "
+                            "guardrails. This means REVIEW â not automatically "
+                            "change the live scanner."
+                        )
+                    else:
+                        st.info(
+                            "No alternate profile qualified for promotion review. "
+                            "Keep the live production rules unchanged."
+                        )
 
 
 # ============================================================
@@ -2930,421 +1469,28 @@ with tab2:
 # ============================================================
 
 with tab3:
-
-    if st.session_state.latest_backtest_result is not None:
-        render_calibration_lab(
-            st.session_state.latest_backtest_result
-        )
-
-        st.divider()
-
-    st.subheader(
-        "Strategy Calibration & Validation"
-    )
+    st.subheader("v3.4 Calibration & Walk-Forward Validation")
 
     st.info(
-        "This section is designed to stop us from guessing which settings "
-        "are best. It evaluates the most recent completed backtest and "
-        "separates historical fit from later out-of-sample performance."
+        "This research lab compares production rules with bounded alternate "
+        "threshold profiles using the actual portfolio simulator. The live "
+        "scanner remains unchanged unless you deliberately update it later."
     )
 
-    st.warning(
-        "Do not lower the live BUY thresholds simply because a lower "
-        "threshold produces more candidates. More trades are not necessarily "
-        "better trades."
-    )
-
-    result = (
-        st.session_state.latest_backtest_result
-    )
-
-    settings = (
-        st.session_state.latest_backtest_settings
-    )
+    result = st.session_state.latest_backtest_result
+    settings = st.session_state.latest_backtest_settings
 
     if result is None:
-
         st.warning(
             "Run a backtest first in the '$2,000 Swing Backtester' tab. "
-            "The results will automatically appear here."
+            "The completed results will automatically appear here."
         )
-
     else:
-
-        trades = result.get(
-            "trades",
-            pd.DataFrame(),
-        )
-
-        signal_log = result.get(
-            "signal_log",
-            pd.DataFrame(),
-        )
-
         if settings:
+            with st.expander("Backtest used for this calibration"):
+                st.json(settings)
 
-            with st.expander(
-                "Backtest used for this validation"
-            ):
-
-                st.json(
-                    settings
-                )
-
-        st.header(
-            "1. Chronological Out-of-Sample Validation"
-        )
-
-        st.caption(
-            "The oldest 70% of completed trades are treated as the "
-            "in-sample period. The newest 30% are treated as unseen "
-            "out-of-sample data."
-        )
-
-        validation = (
-            chronological_validation(
-                trades,
-                train_fraction=0.70,
-                min_total_trades=30,
-                min_oos_trades=10,
-            )
-        )
-
-        v1, v2, v3 = st.columns(
-            3
-        )
-
-        v1.metric(
-            "Confidence Grade",
-            validation.get(
-                "confidence_grade",
-                "INSUFFICIENT",
-            ),
-        )
-
-        v2.metric(
-            "Total Trades",
-            validation.get(
-                "sample_trades",
-                0,
-            ),
-        )
-
-        v3.metric(
-            "Out-of-Sample Trades",
-            validation.get(
-                "out_of_sample_trades",
-                0,
-            ),
-        )
-
-        v4, v5 = st.columns(
-            2
-        )
-
-        v4.metric(
-            "In-Sample Win Rate",
-            pct_display(
-                validation.get(
-                    "in_sample_win_rate_pct",
-                    0,
-                )
-            ),
-        )
-
-        v5.metric(
-            "Out-of-Sample Win Rate",
-            pct_display(
-                validation.get(
-                    "out_of_sample_win_rate_pct",
-                    0,
-                )
-            ),
-        )
-
-        v6, v7 = st.columns(
-            2
-        )
-
-        v6.metric(
-            "In-Sample Expectancy",
-            f"{safe_float(validation.get('in_sample_expectancy_r')):.3f} R",
-        )
-
-        v7.metric(
-            "Out-of-Sample Expectancy",
-            f"{safe_float(validation.get('out_of_sample_expectancy_r')):.3f} R",
-        )
-
-        v8, v9 = st.columns(
-            2
-        )
-
-        v8.metric(
-            "OOS Profit Factor",
-            validation.get(
-                "out_of_sample_profit_factor",
-                0,
-            ),
-        )
-
-        ci_low = validation.get(
-            "bootstrap_expectancy_low_r"
-        )
-
-        ci_high = validation.get(
-            "bootstrap_expectancy_high_r"
-        )
-
-        if (
-            ci_low is None
-            or ci_high is None
-        ):
-
-            ci_text = (
-                "Not enough trades"
-            )
-
-        else:
-
-            ci_text = (
-                f"{ci_low:.3f} to "
-                f"{ci_high:.3f} R"
-            )
-
-        v9.metric(
-            "95% Expectancy Range",
-            ci_text,
-        )
-
-        if validation.get(
-            "validation_pass",
-            False,
-        ):
-
-            st.success(
-                "VALIDATION PASS — the configured strategy passed the "
-                "current chronological holdout and bootstrap requirements."
-            )
-
-        else:
-
-            st.error(
-                "VALIDATION NOT YET PASSED — do not interpret the backtest "
-                "as proof that the strategy has a durable edge."
-            )
-
-        notes = validation.get(
-            "notes",
-            [],
-        )
-
-        for note in notes:
-
-            st.write(
-                f"• {note}"
-            )
-
-        st.divider()
-
-        st.header(
-            "2. Threshold Sensitivity"
-        )
-
-        st.caption(
-            "This compares how selective different Swing Score, Intraday "
-            "Score and Entry Quality combinations would be on the historical "
-            "signal observations."
-        )
-
-        st.warning(
-            "This table measures candidate frequency only. It does NOT yet "
-            "claim that a lower threshold is more profitable. A true "
-            "profitability comparison requires rerunning the simulator under "
-            "each threshold combination."
-        )
-
-        sensitivity = calibration_summary(
-            signal_log
-        )
-
-        if sensitivity.empty:
-
-            st.info(
-                "There is not enough signal-audit data to build the "
-                "threshold sensitivity table."
-            )
-
-        else:
-
-            production_row = sensitivity[
-                (
-                    sensitivity[
-                        "Swing threshold"
-                    ]
-                    == 85.0
-                )
-                & (
-                    sensitivity[
-                        "Intraday threshold"
-                    ]
-                    == 85.0
-                )
-                & (
-                    sensitivity[
-                        "Entry quality"
-                    ]
-                    == 10.0
-                )
-            ]
-
-            if not production_row.empty:
-
-                production_candidates = int(
-                    production_row.iloc[
-                        0
-                    ][
-                        "Historical candidates"
-                    ]
-                )
-
-                st.metric(
-                    "Production-rule candidates",
-                    production_candidates,
-                )
-
-            st.dataframe(
-                sensitivity,
-                width="stretch",
-                hide_index=True,
-            )
-
-            st.download_button(
-                "Download threshold sensitivity",
-                data=(
-                    sensitivity
-                    .to_csv(
-                        index=False
-                    )
-                    .encode(
-                        "utf-8"
-                    )
-                ),
-                file_name=(
-                    "v3_3_threshold_sensitivity.csv"
-                ),
-                mime="text/csv",
-                width="stretch",
-            )
-
-        st.divider()
-
-        st.header(
-            "3. Strategy Decision"
-        )
-
-        total_trades = validation.get(
-            "sample_trades",
-            0,
-        )
-
-        oos_trades = validation.get(
-            "out_of_sample_trades",
-            0,
-        )
-
-        oos_expectancy = safe_float(
-            validation.get(
-                "out_of_sample_expectancy_r",
-                0,
-            )
-        )
-
-        grade = validation.get(
-            "confidence_grade",
-            "INSUFFICIENT",
-        )
-
-        if (
-            validation.get(
-                "validation_pass",
-                False,
-            )
-            and grade
-            in [
-                "A",
-                "B",
-            ]
-        ):
-
-            st.success(
-                "KEEP CURRENT PRODUCTION RULES. "
-                "The strategy has enough evidence to justify continued "
-                "paper testing without loosening the BUY gates."
-            )
-
-        elif (
-            total_trades
-            < 30
-            or oos_trades
-            < 10
-        ):
-
-            st.warning(
-                "COLLECT MORE DATA. The strategy does not yet have enough "
-                "completed trades for a dependable statistical conclusion. "
-                "Do not loosen the BUY rules merely to force more trades."
-            )
-
-        elif (
-            oos_expectancy
-            <= 0
-        ):
-
-            st.error(
-                "RESEARCH REQUIRED. Out-of-sample expectancy is not positive. "
-                "Do not move this strategy toward automated real-money trading."
-            )
-
-        else:
-
-            st.warning(
-                "PROMISING BUT NOT PROVEN. Continue out-of-sample testing "
-                "and paper trading before changing production thresholds."
-            )
-
-        st.divider()
-
-        st.header(
-            "What this version tells us"
-        )
-
-        st.write(
-            "The live scanner answers: **Is there a valid BUY right now?**"
-        )
-
-        st.write(
-            "The production backtester answers: **Would these exact rules "
-            "have produced trades historically?**"
-        )
-
-        st.write(
-            "The validation engine answers: **Did the strategy continue "
-            "working on later data that was not part of the initial sample?**"
-        )
-
-        st.write(
-            "The threshold sensitivity table answers: **How restrictive "
-            "are alternative score thresholds?**"
-        )
-
-        st.info(
-            "The next major upgrade, after we verify this screen works, "
-            "is true multi-threshold portfolio calibration. That will rerun "
-            "the actual trading simulator under each rule combination and "
-            "compare out-of-sample expectancy, profit factor, drawdown and "
-            "trade count instead of merely comparing candidate frequency."
-        )
+        render_calibration_lab(result)
 
 
 # ============================================================
@@ -3354,7 +1500,8 @@ with tab3:
 st.divider()
 
 st.warning(
-    "Research only. Scanner signals, calibration results and simulated "
-    "performance do not guarantee future returns. Use out-of-sample testing "
-    "and paper trading before risking real capital."
+    "Research only. Scanner signals, calibration results and simulated performance "
+    "do not guarantee future returns. v3.4 does not automatically change production "
+    "BUY rules. Repeat promising results across non-overlapping periods, a broader "
+    "historical universe and paper trading before risking real capital."
 )
