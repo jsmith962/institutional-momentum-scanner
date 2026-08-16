@@ -1,6 +1,12 @@
+import base64
+import gzip
 import os
-from datetime import datetime, timedelta
+import pickle
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import requests
 
 import pandas as pd
 import plotly.express as px
@@ -31,6 +37,250 @@ from strategy import (
 
 
 # ============================================================
+# PERSISTENT RESEARCH STATE
+# ============================================================
+
+PERSIST_DIR = Path(".scanner_cache")
+PERSIST_DIR.mkdir(exist_ok=True)
+LOCAL_RESEARCH_STATE = PERSIST_DIR / "latest_research_state.pkl.gz"
+
+GITHUB_API_BASE = "https://api.github.com"
+DEFAULT_RESEARCH_STATE_PATH = "research_state/latest_research_state.pkl.gz"
+
+
+def _setting(name, default=None):
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.getenv(name, default)
+
+
+def _github_persistence_config():
+    token = _setting("GITHUB_PERSISTENCE_TOKEN")
+    repo = _setting("GITHUB_PERSISTENCE_REPO")
+    branch = _setting("GITHUB_PERSISTENCE_BRANCH", "main")
+    path = _setting("GITHUB_PERSISTENCE_PATH", DEFAULT_RESEARCH_STATE_PATH)
+
+    configured = bool(token and repo)
+    return {
+        "configured": configured,
+        "token": str(token) if token else None,
+        "repo": str(repo) if repo else None,
+        "branch": str(branch or "main"),
+        "path": str(path or DEFAULT_RESEARCH_STATE_PATH),
+    }
+
+
+def _pack_research_state(payload):
+    raw = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+    return gzip.compress(raw, compresslevel=6)
+
+
+def _unpack_research_state(blob):
+    return pickle.loads(gzip.decompress(blob))
+
+
+def _build_research_payload():
+    return {
+        "schema_version": 1,
+        "app_version": "v3.4.3",
+        "saved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "latest_backtest_result": st.session_state.get("latest_backtest_result"),
+        "latest_backtest_settings": st.session_state.get("latest_backtest_settings"),
+        "latest_fast_calibration": st.session_state.get("latest_fast_calibration"),
+    }
+
+
+def _write_local_research_state(payload):
+    try:
+        LOCAL_RESEARCH_STATE.write_bytes(_pack_research_state(payload))
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _read_local_research_state():
+    try:
+        if not LOCAL_RESEARCH_STATE.exists():
+            return None, None
+        return _unpack_research_state(LOCAL_RESEARCH_STATE.read_bytes()), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _github_headers(token):
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "institutional-swing-scanner-v3.4.3",
+    }
+
+
+def _read_github_research_state():
+    cfg = _github_persistence_config()
+    if not cfg["configured"]:
+        return None, "GitHub persistence is not configured."
+
+    url = f"{GITHUB_API_BASE}/repos/{cfg['repo']}/contents/{cfg['path']}"
+
+    try:
+        response = requests.get(
+            url,
+            headers=_github_headers(cfg["token"]),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+
+        if response.status_code == 404:
+            return None, None
+
+        response.raise_for_status()
+        body = response.json()
+        encoded = body.get("content", "").replace("\n", "")
+        if not encoded:
+            return None, "GitHub research-state file was empty."
+
+        blob = base64.b64decode(encoded)
+        return _unpack_research_state(blob), None
+
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _write_github_research_state(payload):
+    cfg = _github_persistence_config()
+    if not cfg["configured"]:
+        return False, "GitHub persistence is not configured."
+
+    url = f"{GITHUB_API_BASE}/repos/{cfg['repo']}/contents/{cfg['path']}"
+    headers = _github_headers(cfg["token"])
+
+    try:
+        existing = requests.get(
+            url,
+            headers=headers,
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+
+        sha = None
+        if existing.status_code == 200:
+            sha = existing.json().get("sha")
+        elif existing.status_code != 404:
+            existing.raise_for_status()
+
+        blob = _pack_research_state(payload)
+        body = {
+            "message": "Save scanner research state",
+            "content": base64.b64encode(blob).decode("ascii"),
+            "branch": cfg["branch"],
+        }
+        if sha:
+            body["sha"] = sha
+
+        response = requests.put(
+            url,
+            headers=headers,
+            json=body,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return True, None
+
+    except Exception as exc:
+        return False, str(exc)
+
+
+def save_research_state():
+    payload = _build_research_payload()
+    local_ok, local_error = _write_local_research_state(payload)
+
+    github_ok = False
+    github_error = None
+    if _github_persistence_config()["configured"]:
+        github_ok, github_error = _write_github_research_state(payload)
+
+    st.session_state["research_persistence_status"] = {
+        "local_ok": local_ok,
+        "local_error": local_error,
+        "github_ok": github_ok,
+        "github_error": github_error,
+        "saved_at_utc": payload["saved_at_utc"],
+    }
+    return st.session_state["research_persistence_status"]
+
+
+def _restore_payload(payload, source):
+    if not isinstance(payload, dict):
+        return False
+
+    restored = False
+
+    if payload.get("latest_backtest_result") is not None:
+        st.session_state.latest_backtest_result = payload.get("latest_backtest_result")
+        restored = True
+
+    if payload.get("latest_backtest_settings") is not None:
+        st.session_state.latest_backtest_settings = payload.get("latest_backtest_settings")
+
+    if payload.get("latest_fast_calibration") is not None:
+        st.session_state.latest_fast_calibration = payload.get("latest_fast_calibration")
+
+    if restored:
+        st.session_state["research_restore_source"] = source
+        st.session_state["research_restore_saved_at"] = payload.get("saved_at_utc")
+
+    return restored
+
+
+def restore_research_state_once():
+    if st.session_state.get("research_restore_attempted"):
+        return
+
+    st.session_state["research_restore_attempted"] = True
+
+    # Fast path: same Streamlit instance.
+    local_payload, local_error = _read_local_research_state()
+    if local_payload is not None and _restore_payload(local_payload, "local cache"):
+        return
+
+    # Cross-redeploy path: GitHub repository storage.
+    if _github_persistence_config()["configured"]:
+        github_payload, github_error = _read_github_research_state()
+        if github_payload is not None and _restore_payload(github_payload, "GitHub persistence"):
+            # Rehydrate the local cache for faster subsequent reruns.
+            _write_local_research_state(github_payload)
+            return
+        if github_error:
+            st.session_state["research_restore_error"] = github_error
+    elif local_error:
+        st.session_state["research_restore_error"] = local_error
+
+
+def persist_calibration_if_changed():
+    calibration = st.session_state.get("latest_fast_calibration")
+    if calibration is None:
+        return
+
+    marker = repr(
+        (
+            calibration.get("status") if isinstance(calibration, dict) else type(calibration).__name__,
+            calibration.get("candidate_count") if isinstance(calibration, dict) else None,
+            len(calibration.get("summary", [])) if isinstance(calibration, dict) else None,
+        )
+    )
+
+    if st.session_state.get("last_persisted_calibration_marker") == marker:
+        return
+
+    save_research_state()
+    st.session_state["last_persisted_calibration_marker"] = marker
+
+
+# ============================================================
 # APP CONFIGURATION
 # ============================================================
 
@@ -38,11 +288,11 @@ load_dotenv()
 ET = ZoneInfo("America/New_York")
 
 st.set_page_config(
-    page_title="Institutional Swing Scanner v3.4.2",
+    page_title="Institutional Swing Scanner v3.4.3",
     layout="wide",
 )
 
-st.title("Institutional Swing Scanner v3.4.2")
+st.title("Institutional Swing Scanner v3.4.3")
 st.caption(
     "Full U.S. market  |  catalyst-gap protection  |  daily + intraday confirmation  |  "
     "SMS alerts  |  production-equivalent backtesting  |  adaptive walk-forward calibration  |  "
@@ -67,6 +317,11 @@ if "latest_backtest_result" not in st.session_state:
 
 if "latest_backtest_settings" not in st.session_state:
     st.session_state.latest_backtest_settings = None
+
+if "latest_fast_calibration" not in st.session_state:
+    st.session_state.latest_fast_calibration = None
+
+restore_research_state_once()
 
 
 # ============================================================
@@ -293,6 +548,27 @@ with st.sidebar:
             st.warning("SMS secrets are not configured yet.")
 
     st.divider()
+    st.subheader("Research persistence")
+
+    persistence_cfg = _github_persistence_config()
+    if persistence_cfg["configured"]:
+        st.success("GitHub research persistence configured")
+        st.caption(
+            f"{persistence_cfg['repo']} / {persistence_cfg['branch']} / "
+            f"{persistence_cfg['path']}"
+        )
+    else:
+        st.warning("Local-session persistence only")
+        st.caption(
+            "Add GITHUB_PERSISTENCE_TOKEN and GITHUB_PERSISTENCE_REPO to "
+            "Streamlit Secrets to preserve research across redeploys."
+        )
+
+    restore_source = st.session_state.get("research_restore_source")
+    if restore_source:
+        st.caption(f"Last research state restored from {restore_source}.")
+
+    st.divider()
     st.subheader("Tracked positions")
     tracked_positions = st.text_input(
         "Symbols you currently hold",
@@ -319,7 +595,7 @@ with tab1:
     st.info(
         "A strong stock is not automatically a BUY. Production rules retain the "
         "85 Swing Score and 85 Intraday Score gates plus catalyst, trend, leadership, "
-        "entry-zone and risk/reward protections. v3.4.2 calibration is research-only."
+        "entry-zone and risk/reward protections. v3.4.3 calibration is research-only."
     )
 
     c1, c2 = st.columns(2)
@@ -916,7 +1192,7 @@ with tab1:
                 st.download_button(
                     "Download latest swing scan",
                     data=out.to_csv(index=False).encode("utf-8"),
-                    file_name="v3_4_swing_scan_latest.csv",
+                    file_name="v3_4_3_swing_scan_latest.csv",
                     mime="text/csv",
                     width="stretch",
                 )
@@ -940,7 +1216,7 @@ with tab2:
     st.info(
         "The production run uses the same daily score, market-regime rules, "
         "leadership gate, catalyst protection and intraday confirmation used by "
-        "the live scanner. v3.4.2 can then run bounded alternate threshold profiles "
+        "the live scanner. v3.4.3 can then run bounded alternate threshold profiles "
         "through the actual portfolio simulator for research only."
     )
 
@@ -1052,7 +1328,7 @@ with tab2:
     st.divider()
 
     st.info(
-        "v3.4.2 runs the production backtest by itself first. Adaptive calibration "
+        "v3.4.3 runs the production backtest by itself first. Adaptive calibration "
         "is handled separately in the Calibration & Validation tab using the completed "
         "candidate log, so the backtest is not forced to repeat expensive work."
     )
@@ -1206,8 +1482,25 @@ with tab2:
                 "slippage_bps": slippage_bps,
                 "commission_bps": commission_bps,
                 "feed": btfeed,
-                "v3_4_2_calibration": "separate_calibration_tab",
+                "v3_4_3_calibration": "separate_calibration_tab",
             }
+
+            persistence = save_research_state()
+
+            if persistence.get("github_ok"):
+                st.success(
+                    "Backtest and candidate log saved to persistent GitHub research storage."
+                )
+            elif _github_persistence_config()["configured"]:
+                st.warning(
+                    "Backtest completed, but GitHub persistence failed: "
+                    + str(persistence.get("github_error") or "unknown error")
+                )
+            elif persistence.get("local_ok"):
+                st.info(
+                    "Backtest cached locally. Configure GitHub persistence to keep it "
+                    "through Streamlit redeploys."
+                )
 
             stats = res.get("stats", {})
 
@@ -1235,7 +1528,7 @@ with tab2:
             if stats.get("trades", 0) == 0:
                 st.info(
                     "The production 85/85 rules produced no completed trades in "
-                    "this sample. v3.4.2 calibration can still test bounded research "
+                    "this sample. v3.4.3 calibration can still test bounded research "
                     "profiles without changing the live scanner."
                 )
 
@@ -1339,7 +1632,7 @@ with tab2:
                 st.download_button(
                     "Download simulated trades",
                     data=trades.to_csv(index=False).encode("utf-8"),
-                    file_name="v3_4_swing_backtest_trades.csv",
+                    file_name="v3_4_3_swing_backtest_trades.csv",
                     mime="text/csv",
                     width="stretch",
                 )
@@ -1360,7 +1653,7 @@ with tab2:
                     st.download_button(
                         "Download signal audit",
                         data=signal_log.to_csv(index=False).encode("utf-8"),
-                        file_name="v3_4_signal_audit.csv",
+                        file_name="v3_4_3_signal_audit.csv",
                         mime="text/csv",
                         width="stretch",
                     )
@@ -1372,7 +1665,7 @@ with tab2:
 # ============================================================
 
 with tab3:
-    st.subheader("v3.4.2 Calibration & Walk-Forward Validation")
+    st.subheader("v3.4.3 Calibration & Walk-Forward Validation")
 
     st.info(
         "This research lab uses the completed production backtest candidate log for "
@@ -1395,6 +1688,15 @@ with tab3:
                 st.json(settings)
 
         render_calibration_lab(result)
+        persist_calibration_if_changed()
+
+        persistence_cfg = _github_persistence_config()
+        if not persistence_cfg["configured"]:
+            st.warning(
+                "For cross-redeploy persistence, add GITHUB_PERSISTENCE_TOKEN and "
+                "GITHUB_PERSISTENCE_REPO to Streamlit Secrets. Until then, completed "
+                "research is cached only on the current Streamlit instance."
+            )
 
 
 # ============================================================
@@ -1405,7 +1707,7 @@ st.divider()
 
 st.warning(
     "Research only. Scanner signals, calibration results and simulated performance "
-    "do not guarantee future returns. v3.4.2 does not automatically change production "
+    "do not guarantee future returns. v3.4.3 does not automatically change production "
     "BUY rules. Repeat promising results across non-overlapping periods, a broader "
     "historical universe and paper trading before risking real capital."
 )
