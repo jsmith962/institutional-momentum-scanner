@@ -1,4 +1,4 @@
-"""Streamlit renderer for v3.4 calibration and walk-forward research."""
+"""Streamlit renderer for v3.4.1 calibration and walk-forward research."""
 from __future__ import annotations
 import pandas as pd
 import streamlit as st
@@ -7,7 +7,7 @@ from calibration import calibration_summary, score_distribution, threshold_reach
 
 def render_calibration_lab(result: dict) -> None:
     st.divider()
-    st.header("v3.4 Calibration & Walk-Forward Lab")
+    st.header("v3.4.1 Calibration & Walk-Forward Lab")
     st.caption("Research only. This lab never changes the live BUY thresholds automatically.")
     if not isinstance(result, dict):
         st.info("Run a historical backtest first.")
@@ -42,7 +42,7 @@ def render_calibration_lab(result: dict) -> None:
     cal = result.get("calibration_result")
     st.subheader("Actual portfolio-simulator calibration")
     if not cal:
-        st.info("This backtest did not run the v3.4 adaptive calibration. Enable the v3.4 calibration run in the Backtester and rerun it.")
+        st.info("This backtest did not run the v3.4.1 adaptive calibration. Return to the Backtester and press RUN FAST ADAPTIVE CALIBRATION after a production backtest.")
         return
 
     comp = cal.get("comparison", pd.DataFrame())
@@ -64,6 +64,6 @@ def render_calibration_lab(result: dict) -> None:
     cols = [c for c in preferred if c in comp.columns]
     st.dataframe(comp[cols], use_container_width=True, hide_index=True)
 
-    st.download_button("Download v3.4 calibration comparison", data=comp.to_csv(index=False).encode("utf-8"),
+    st.download_button("Download v3.4.1 calibration comparison", data=comp.to_csv(index=False).encode("utf-8"),
                        file_name="v3_4_actual_simulator_calibration.csv", mime="text/csv", use_container_width=True)
     st.info("A profile must have enough total and out-of-sample trades, positive OOS expectancy, acceptable drawdown, and a positive bootstrap lower bound before it is even flagged for review. Live rules remain unchanged until you deliberately change them.")
