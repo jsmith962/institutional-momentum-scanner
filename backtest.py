@@ -3689,3 +3689,188 @@ def calibrate_thresholds(
 # ============================================================
 
 backtest = swing_backtest
+
+# ============================================================
+# v3.4 ADAPTIVE WALK-FORWARD CALIBRATION
+# ============================================================
+
+def _quantile_or_default(series, q, default):
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return float(default)
+    return float(s.quantile(q))
+
+
+def build_adaptive_calibration_profiles(production_result, max_profiles=16):
+    """Build a bounded, data-aware research grid without changing production rules.
+
+    Thresholds are anchored to reachable historical score percentiles, then clipped to
+    conservative floors. This avoids wasting calibration runs on impossible 85/85 gates
+    while also avoiding a brute-force search that would invite overfitting.
+    """
+    signal_log = (production_result or {}).get("signal_log", pd.DataFrame())
+    if signal_log is None or signal_log.empty:
+        return CALIBRATION_PROFILES[:max_profiles]
+
+    swing = pd.to_numeric(signal_log.get("swing_score"), errors="coerce")
+    intra = pd.to_numeric(signal_log.get("intraday_score"), errors="coerce")
+
+    swing_candidates = {
+        85.0,
+        round(_quantile_or_default(swing, .99, 82.5) * 2) / 2,
+        round(_quantile_or_default(swing, .95, 80.0) * 2) / 2,
+        round(_quantile_or_default(swing, .90, 77.5) * 2) / 2,
+        round(_quantile_or_default(swing, .80, 75.0) * 2) / 2,
+    }
+    intra_candidates = {
+        85.0,
+        round(_quantile_or_default(intra, .99, 80.0) / 5) * 5,
+        round(_quantile_or_default(intra, .95, 75.0) / 5) * 5,
+        round(_quantile_or_default(intra, .90, 70.0) / 5) * 5,
+    }
+
+    # Research floors only. These are NOT live-rule changes.
+    swing_candidates = sorted({min(85.0, max(70.0, x)) for x in swing_candidates}, reverse=True)
+    intra_candidates = sorted({min(85.0, max(55.0, x)) for x in intra_candidates}, reverse=True)
+
+    profiles = [{"name": "PRODUCTION_85_85", **PRODUCTION_GATE_CONFIG}]
+    seen = {(85.0, 85.0, 10.0, 70.0)}
+
+    for s in swing_candidates:
+        for i in intra_candidates:
+            key = (float(s), float(i), 10.0, 70.0)
+            if key in seen:
+                continue
+            seen.add(key)
+            profiles.append({
+                "name": f"ADAPT_S{s:g}_I{i:g}".replace(".", "_"),
+                **PRODUCTION_GATE_CONFIG,
+                "swing_score": float(s),
+                "intraday_score": float(i),
+            })
+            if len(profiles) >= max_profiles:
+                return profiles
+
+    return profiles
+
+
+def _add_v34_research_decision(comparison):
+    if comparison is None or comparison.empty:
+        return pd.DataFrame()
+    out = comparison.copy()
+    for c in ["trades", "out_of_sample_trades", "out_of_sample_expectancy_r",
+              "out_of_sample_profit_factor", "max_drawdown_pct", "bootstrap_expectancy_low_r"]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    out["research_eligible"] = (
+        out["trades"].fillna(0).ge(30)
+        & out["out_of_sample_trades"].fillna(0).ge(10)
+        & out["out_of_sample_expectancy_r"].fillna(-999).gt(0)
+        & out["out_of_sample_profit_factor"].replace([np.inf, -np.inf], np.nan).fillna(0).ge(1.15)
+        & out["max_drawdown_pct"].abs().fillna(999).le(20)
+    )
+    # Stronger promotion flag: requires a positive lower bootstrap bound.
+    out["promotion_candidate"] = (
+        out["research_eligible"]
+        & out["bootstrap_expectancy_low_r"].fillna(-999).gt(0)
+        & out["out_of_sample_expectancy_r"].fillna(-999).ge(0.10)
+        & out["out_of_sample_profit_factor"].replace([np.inf, -np.inf], np.nan).fillna(0).ge(1.20)
+    )
+
+    # Rank for research only. Lower drawdown is better.
+    out["research_score"] = (
+        100 * out["promotion_candidate"].astype(int)
+        + 30 * out["research_eligible"].astype(int)
+        + 20 * out["validation_pass"].fillna(False).astype(bool).astype(int)
+        + 12 * out["out_of_sample_expectancy_r"].clip(-1, 1).fillna(-1)
+        + 4 * out["out_of_sample_profit_factor"].replace([np.inf, -np.inf], np.nan).clip(0, 3).fillna(0)
+        + np.minimum(out["out_of_sample_trades"].fillna(0), 50) / 10
+        - out["max_drawdown_pct"].abs().fillna(50) / 10
+    ).round(3)
+    return out.sort_values(
+        ["promotion_candidate", "research_eligible", "research_score", "out_of_sample_expectancy_r"],
+        ascending=[False, False, False, False],
+    ).reset_index(drop=True)
+
+
+def calibrate_thresholds_adaptive(
+    bars,
+    spy_bars,
+    qqq_bars=None,
+    daily_bars=None,
+    market_daily_bars=None,
+    starting_capital=2_000,
+    risk_pct=0.005,
+    max_positions=3,
+    max_holding_days=20,
+    scan_time="11:30",
+    slippage_bps=5.0,
+    commission_bps=0.0,
+    production_result=None,
+    max_profiles=16,
+):
+    """v3.4 bounded adaptive calibration using the real portfolio simulator.
+
+    The live rules remain unchanged. Alternate settings are research-only and must pass
+    chronological OOS validation before they can even be considered for promotion.
+    """
+    if production_result is None:
+        production_result = swing_backtest(
+            bars, spy_bars, qqq_bars=qqq_bars, daily_bars=daily_bars,
+            market_daily_bars=market_daily_bars, starting_capital=starting_capital,
+            risk_pct=risk_pct, max_positions=max_positions,
+            max_holding_days=max_holding_days, scan_time=scan_time,
+            slippage_bps=slippage_bps, commission_bps=commission_bps,
+        )
+
+    profiles = build_adaptive_calibration_profiles(production_result, max_profiles=max_profiles)
+    # Reuse production result and only rerun alternate research profiles.
+    alternate = [p for p in profiles if p.get("name") != "PRODUCTION_85_85"]
+    cal = calibrate_thresholds(
+        bars, spy_bars, qqq_bars=qqq_bars, daily_bars=daily_bars,
+        market_daily_bars=market_daily_bars, starting_capital=starting_capital,
+        risk_pct=risk_pct, max_positions=max_positions,
+        max_holding_days=max_holding_days, scan_time=scan_time,
+        slippage_bps=slippage_bps, commission_bps=commission_bps,
+        profiles=alternate,
+    )
+
+    # Add the already-computed production row without rerunning it.
+    prod_stats = production_result.get("stats", {})
+    prod_val = production_result.get("validation", {})
+    prod_row = {
+        "profile": "PRODUCTION_85_85", "production_rules": True,
+        "swing_score_gate": PRODUCTION_GATE_CONFIG["swing_score"],
+        "intraday_score_gate": PRODUCTION_GATE_CONFIG["intraday_score"],
+        "entry_quality_gate": PRODUCTION_GATE_CONFIG["entry_quality"],
+        "leadership_gate": PRODUCTION_GATE_CONFIG["leadership_percentile"],
+        "market_score_gate": PRODUCTION_GATE_CONFIG["market_score"],
+        "reward_risk_gate": PRODUCTION_GATE_CONFIG["reward_risk"],
+        "max_distribution_days": PRODUCTION_GATE_CONFIG["max_distribution_days"],
+        "trades": prod_stats.get("trades", 0),
+        "return_pct": prod_stats.get("total_return_pct", 0),
+        "win_rate_pct": prod_stats.get("win_rate_pct", 0),
+        "profit_factor": prod_stats.get("profit_factor", 0),
+        "expectancy_r": prod_stats.get("expectancy_r", 0),
+        "max_drawdown_pct": prod_stats.get("max_drawdown_pct", 0),
+        "out_of_sample_trades": prod_val.get("out_of_sample_trades", 0),
+        "out_of_sample_win_rate_pct": prod_val.get("out_of_sample_win_rate_pct", 0),
+        "out_of_sample_expectancy_r": prod_val.get("out_of_sample_expectancy_r", 0),
+        "out_of_sample_profit_factor": prod_val.get("out_of_sample_profit_factor", 0),
+        "bootstrap_expectancy_low_r": prod_val.get("bootstrap_expectancy_low_r"),
+        "bootstrap_expectancy_high_r": prod_val.get("bootstrap_expectancy_high_r"),
+        "confidence_grade": prod_val.get("confidence_grade", "INSUFFICIENT"),
+        "validation_pass": bool(prod_val.get("validation_pass", False)),
+    }
+    comparison = pd.concat([pd.DataFrame([prod_row]), cal.get("comparison", pd.DataFrame())], ignore_index=True)
+    comparison = _add_v34_research_decision(comparison)
+    cal["comparison"] = comparison
+    cal["profiles_tested"] = len(profiles)
+    cal["production_result"] = production_result
+    cal["adaptive_profiles"] = pd.DataFrame(profiles)
+    cal["recommendation"] = (
+        "KEEP_PRODUCTION_RULES" if not comparison.get("promotion_candidate", pd.Series(dtype=bool)).any()
+        else "REVIEW_PROMOTION_CANDIDATES"
+    )
+    return cal
