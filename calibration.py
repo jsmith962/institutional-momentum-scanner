@@ -1,836 +1,1679 @@
 """
-Institutional Swing Scanner v3.5.1
-Calibration UI.
+Institutional Swing Scanner v3.5.2
+Fast Calibration Engine
 
-Research only.
+RESEARCH ONLY.
 
-v3.5.1 specifically distinguishes:
+This module analyzes the historical signal log produced by the
+production backtester.
 
-PRODUCTION CONTROL
-    Uses the original production intraday BUY label.
-
-RESEARCH PROFILES
-    Use their own numeric Intraday Score threshold and do not remain
-    artificially blocked by the production classifier's BUY label.
-
-The UI also displays a profile-specific sequential gate funnel so we can
-identify exactly which remaining gate is preventing candidates.
+IMPORTANT:
+- It does NOT import itself.
+- It does NOT request Alpaca market data.
+- It does NOT modify live production thresholds.
+- Production control retains the original intraday BUY-label requirement.
+- Research profiles use their own numeric intraday thresholds.
+- Candidate stability is NOT the same thing as profitability.
 """
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
+
+import numpy as np
 import pandas as pd
-import streamlit as st
-
-from calibration import (
-    DEFAULT_PROFILES,
-    profile_gate_failures,
-    profile_gate_funnel,
-    production_gate_bottlenecks,
-    run_fast_calibration,
-    score_distribution,
-)
 
 
 # ============================================================
-# HELPERS
+# PRODUCTION THRESHOLDS
 # ============================================================
 
-def _safe_df(
-    value,
-):
-
-    if isinstance(
-        value,
-        pd.DataFrame,
-    ):
-
-        return value
-
-    return pd.DataFrame()
+PRODUCTION_SWING_SCORE = 85.0
+PRODUCTION_INTRADAY_SCORE = 85.0
+PRODUCTION_ENTRY_QUALITY = 10.0
+PRODUCTION_MARKET_SCORE = 5.0
+PRODUCTION_LEADERSHIP = 70.0
+PRODUCTION_MAX_DISTRIBUTION_DAYS = 4
+PRODUCTION_MIN_REWARD_RISK = 2.0
 
 
-def _number(
-    value,
-    digits=1,
-):
+# ============================================================
+# PROFILE MODEL
+# ============================================================
 
-    try:
+@dataclass(frozen=True)
+class CalibrationProfile:
+    name: str
+    swing_score: float
+    intraday_score: float
+    entry_quality: float
+    market_score: float = PRODUCTION_MARKET_SCORE
+    leadership: float = PRODUCTION_LEADERSHIP
+    max_distribution_days: int = PRODUCTION_MAX_DISTRIBUTION_DAYS
+    reward_risk: float = PRODUCTION_MIN_REWARD_RISK
+    production_control: bool = False
 
-        if pd.isna(
-            value
-        ):
 
-            return "—"
+# ============================================================
+# DEFAULT PROFILES
+# ============================================================
 
-        number = float(
-            value
+DEFAULT_PROFILES = [
+    CalibrationProfile(
+        name="Production 85/85",
+        swing_score=85.0,
+        intraday_score=85.0,
+        entry_quality=10.0,
+        production_control=True,
+    ),
+
+    CalibrationProfile(
+        name="Research S82.5/I80",
+        swing_score=82.5,
+        intraday_score=80.0,
+        entry_quality=10.0,
+    ),
+
+    CalibrationProfile(
+        name="Research S80/I80",
+        swing_score=80.0,
+        intraday_score=80.0,
+        entry_quality=10.0,
+    ),
+
+    CalibrationProfile(
+        name="Research S79/I75",
+        swing_score=79.0,
+        intraday_score=75.0,
+        entry_quality=10.0,
+    ),
+
+    CalibrationProfile(
+        name="Research S77.5/I70",
+        swing_score=77.5,
+        intraday_score=70.0,
+        entry_quality=10.0,
+    ),
+
+    CalibrationProfile(
+        name="Research S75/I65",
+        swing_score=75.0,
+        intraday_score=65.0,
+        entry_quality=10.0,
+    ),
+
+    CalibrationProfile(
+        name="Research S72.5/I60",
+        swing_score=72.5,
+        intraday_score=60.0,
+        entry_quality=10.0,
+    ),
+
+    CalibrationProfile(
+        name="Research S70/I60",
+        swing_score=70.0,
+        intraday_score=60.0,
+        entry_quality=10.0,
+    ),
+
+    CalibrationProfile(
+        name="Research S72.5/I60 Q12",
+        swing_score=72.5,
+        intraday_score=60.0,
+        entry_quality=12.0,
+    ),
+
+    CalibrationProfile(
+        name="Research S70/I55",
+        swing_score=70.0,
+        intraday_score=55.0,
+        entry_quality=10.0,
+    ),
+]
+
+
+# ============================================================
+# SAFE COLUMN HELPERS
+# ============================================================
+
+def _numeric(
+    frame: pd.DataFrame,
+    column: str,
+    default=np.nan,
+) -> pd.Series:
+
+    if column not in frame.columns:
+
+        return pd.Series(
+            default,
+            index=frame.index,
+            dtype="float64",
         )
 
-        if digits == 0:
-
-            return f"{number:,.0f}"
-
-        return f"{number:,.{digits}f}"
-
-    except Exception:
-
-        return "—"
-
-
-def _profile_card(
-    row,
-):
-
-    production = bool(
-        row.get(
-            "production_control",
-            False,
-        )
+    return pd.to_numeric(
+        frame[column],
+        errors="coerce",
     )
 
-    with st.container(
-        border=True
+
+def _boolean(
+    frame: pd.DataFrame,
+    column: str,
+    default=False,
+) -> pd.Series:
+
+    if column not in frame.columns:
+
+        return pd.Series(
+            bool(default),
+            index=frame.index,
+            dtype="bool",
+        )
+
+    values = frame[column]
+
+    if pd.api.types.is_bool_dtype(
+        values
     ):
 
-        st.markdown(
-            f"### {row.get('profile', 'Profile')}"
+        return values.fillna(
+            default
+        ).astype(bool)
+
+    # Handle text values safely.
+    text = (
+        values
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+
+    true_values = {
+        "true",
+        "1",
+        "yes",
+        "y",
+        "t",
+    }
+
+    false_values = {
+        "false",
+        "0",
+        "no",
+        "n",
+        "f",
+        "",
+        "none",
+        "nan",
+    }
+
+    out = pd.Series(
+        bool(default),
+        index=frame.index,
+        dtype="bool",
+    )
+
+    out.loc[
+        text.isin(
+            true_values
+        )
+    ] = True
+
+    out.loc[
+        text.isin(
+            false_values
+        )
+    ] = False
+
+    return out
+
+
+# ============================================================
+# NORMALIZE SIGNAL LOG
+# ============================================================
+
+def _normalise_candidate_log(
+    signal_log: pd.DataFrame,
+) -> pd.DataFrame:
+
+    if (
+        signal_log is None
+        or not isinstance(
+            signal_log,
+            pd.DataFrame,
+        )
+        or signal_log.empty
+    ):
+
+        return pd.DataFrame()
+
+    frame = signal_log.copy()
+
+    frame["_swing"] = _numeric(
+        frame,
+        "swing_score",
+    )
+
+    frame["_intraday"] = _numeric(
+        frame,
+        "intraday_score",
+    )
+
+    frame["_quality"] = _numeric(
+        frame,
+        "entry_quality",
+    )
+
+    frame["_market"] = _numeric(
+        frame,
+        "market_score",
+    )
+
+    frame["_leadership"] = _numeric(
+        frame,
+        "leadership_percentile",
+    )
+
+    frame["_distribution"] = _numeric(
+        frame,
+        "distribution_days",
+    )
+
+    frame["_rr"] = _numeric(
+        frame,
+        "reward_risk",
+    )
+
+    frame["_risk"] = _boolean(
+        frame,
+        "risk_flag",
+        False,
+    )
+
+    frame["_too_extended"] = _boolean(
+        frame,
+        "too_extended",
+        False,
+    )
+
+    frame["_trend"] = _boolean(
+        frame,
+        "trend_health",
+        True,
+    )
+
+    # --------------------------------------------------------
+    # ENTRY ZONE
+    # --------------------------------------------------------
+
+    if "inside_entry_zone" in frame.columns:
+
+        frame["_inside_zone"] = (
+            _boolean(
+                frame,
+                "inside_entry_zone",
+                True,
+            )
         )
 
-        if production:
+    else:
 
-            st.caption(
-                "Production control: requires the original production "
-                "intraday BUY label."
+        reference_price = _numeric(
+            frame,
+            "reference_price",
+        )
+
+        if reference_price.isna().all():
+
+            reference_price = _numeric(
+                frame,
+                "price",
             )
 
-        else:
-
-            st.caption(
-                "Research profile: uses its own numeric Intraday Score "
-                "threshold and does not require the old production BUY label."
-            )
-
-        c1, c2, c3 = st.columns(
-            3
+        entry_low = _numeric(
+            frame,
+            "entry_low",
         )
 
-        c1.metric(
-            "Swing threshold",
-            _number(
-                row.get(
-                    "swing_threshold"
-                ),
-                1,
-            ),
+        entry_high = _numeric(
+            frame,
+            "entry_high",
         )
 
-        c2.metric(
-            "Intraday threshold",
-            _number(
-                row.get(
-                    "intraday_threshold"
-                ),
-                1,
-            ),
+        available = (
+            reference_price.notna()
+            & entry_low.notna()
+            & entry_high.notna()
         )
 
-        c3.metric(
-            "Entry quality",
-            _number(
-                row.get(
-                    "entry_quality"
-                ),
-                1,
-            ),
-        )
+        frame["_inside_zone"] = True
 
-        c4, c5 = st.columns(
-            2
-        )
-
-        c4.metric(
-            "All candidates",
-            _number(
-                row.get(
-                    "all_candidates"
-                ),
-                0,
-            ),
-        )
-
-        c5.metric(
-            "Later-period candidates",
-            _number(
-                row.get(
-                    "later_period_candidates"
-                ),
-                0,
-            ),
-        )
-
-        c6, c7 = st.columns(
-            2
-        )
-
-        c6.metric(
-            "Candidate-positive folds",
+        frame.loc[
+            available,
+            "_inside_zone",
+        ] = (
             (
-                f"{_number(row.get('candidate_positive_folds_pct'), 0)}%"
-            ),
+                reference_price[
+                    available
+                ]
+                >= entry_low[
+                    available
+                ]
+            )
+            &
+            (
+                reference_price[
+                    available
+                ]
+                <= entry_high[
+                    available
+                ]
+            )
         )
 
-        c7.metric(
-            "Stability ratio",
-            _number(
-                row.get(
-                    "stability_ratio"
+    # --------------------------------------------------------
+    # ORIGINAL PRODUCTION INTRADAY LABEL
+    # --------------------------------------------------------
+
+    if "intraday_signal" in frame.columns:
+
+        frame[
+            "_production_intraday_buy"
+        ] = (
+            frame[
+                "intraday_signal"
+            ]
+            .fillna("")
+            .astype(str)
+            .str.upper()
+            .eq("BUY")
+        )
+
+    else:
+
+        frame[
+            "_production_intraday_buy"
+        ] = False
+
+    # --------------------------------------------------------
+    # DATE
+    # --------------------------------------------------------
+
+    date_column = None
+
+    for candidate in [
+        "signal_time",
+        "session",
+        "signal_date",
+        "date",
+        "timestamp",
+    ]:
+
+        if candidate in frame.columns:
+
+            date_column = candidate
+            break
+
+    if date_column is not None:
+
+        frame["_calibration_date"] = (
+            pd.to_datetime(
+                frame[
+                    date_column
+                ],
+                errors="coerce",
+                utc=True,
+            )
+        )
+
+    else:
+
+        frame["_calibration_date"] = (
+            pd.NaT
+        )
+
+    # Must contain the three core research fields.
+    frame = frame[
+        frame["_swing"].notna()
+        & frame["_intraday"].notna()
+        & frame["_quality"].notna()
+    ].copy()
+
+    if frame.empty:
+
+        return frame
+
+    frame = (
+        frame
+        .sort_values(
+            "_calibration_date",
+            na_position="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return frame
+
+
+# ============================================================
+# INDIVIDUAL PROFILE GATES
+# ============================================================
+
+def _profile_gate_series(
+    frame: pd.DataFrame,
+    profile: CalibrationProfile,
+) -> list[tuple[str, pd.Series]]:
+
+    if frame.empty:
+
+        return []
+
+    gates = []
+
+    # 1. Catalyst risk
+    gates.append(
+        (
+            "No active catalyst-risk flag",
+            ~frame["_risk"],
+        )
+    )
+
+    # 2. Extension
+    gates.append(
+        (
+            "Not too extended",
+            ~frame["_too_extended"],
+        )
+    )
+
+    # 3. Swing Score
+    gates.append(
+        (
+            (
+                f"Swing Score >= "
+                f"{profile.swing_score:g}"
+            ),
+            (
+                frame["_swing"]
+                >= profile.swing_score
+            ),
+        )
+    )
+
+    # 4. Entry Quality
+    gates.append(
+        (
+            (
+                f"Entry Quality >= "
+                f"{profile.entry_quality:g}/15"
+            ),
+            (
+                frame["_quality"]
+                >= profile.entry_quality
+            ),
+        )
+    )
+
+    # 5. Reward / risk
+    if frame["_rr"].notna().any():
+
+        gates.append(
+            (
+                (
+                    f"Reward/Risk >= "
+                    f"{profile.reward_risk:g}:1"
                 ),
-                2,
+                (
+                    frame["_rr"].isna()
+                    |
+                    (
+                        frame["_rr"]
+                        >= profile.reward_risk
+                    )
+                ),
+            )
+        )
+
+    # 6. Market regime
+    if frame["_market"].notna().any():
+
+        gates.append(
+            (
+                (
+                    f"Market Score >= "
+                    f"{profile.market_score:g}"
+                ),
+                (
+                    frame["_market"].isna()
+                    |
+                    (
+                        frame["_market"]
+                        >= profile.market_score
+                    )
+                ),
+            )
+        )
+
+    # 7. Entry zone
+    gates.append(
+        (
+            "Inside preferred entry zone",
+            frame["_inside_zone"],
+        )
+    )
+
+    # 8. Trend
+    gates.append(
+        (
+            "Trend health passed",
+            frame["_trend"],
+        )
+    )
+
+    # 9. Distribution
+    if frame[
+        "_distribution"
+    ].notna().any():
+
+        gates.append(
+            (
+                (
+                    "Distribution Days <= "
+                    f"{profile.max_distribution_days}"
+                ),
+                (
+                    frame[
+                        "_distribution"
+                    ].isna()
+                    |
+                    (
+                        frame[
+                            "_distribution"
+                        ]
+                        <= profile.max_distribution_days
+                    )
+                ),
+            )
+        )
+
+    # 10. Leadership
+    if frame[
+        "_leadership"
+    ].notna().any():
+
+        gates.append(
+            (
+                (
+                    "Leadership >= "
+                    f"{profile.leadership:g}th percentile"
+                ),
+                (
+                    frame[
+                        "_leadership"
+                    ].isna()
+                    |
+                    (
+                        frame[
+                            "_leadership"
+                        ]
+                        >= profile.leadership
+                    )
+                ),
+            )
+        )
+
+    # 11. Intraday numeric score
+    gates.append(
+        (
+            (
+                f"Intraday Score >= "
+                f"{profile.intraday_score:g}"
+            ),
+            (
+                frame["_intraday"]
+                >= profile.intraday_score
             ),
         )
+    )
 
-        st.caption(
-            "Candidate stability only. This profile has not been "
-            "proven profitable by this fast diagnostic."
+    # --------------------------------------------------------
+    # KEY v3.5 FIX
+    #
+    # Production control requires original classifier BUY.
+    #
+    # Research profiles DO NOT.
+    # --------------------------------------------------------
+
+    if profile.production_control:
+
+        gates.append(
+            (
+                "Original production intraday signal = BUY",
+                frame[
+                    "_production_intraday_buy"
+                ],
+            )
         )
 
+    return [
+        (
+            name,
+            mask.fillna(
+                False
+            ).astype(bool),
+        )
+        for name, mask in gates
+    ]
+
 
 # ============================================================
-# MAIN UI
+# PROFILE MASK
 # ============================================================
 
-def render_calibration_lab(
-    backtest_result: dict,
-    default_profiles=6,
+def _profile_mask(
+    frame: pd.DataFrame,
+    profile: CalibrationProfile,
+) -> pd.Series:
+
+    if frame.empty:
+
+        return pd.Series(
+            False,
+            index=frame.index,
+            dtype="bool",
+        )
+
+    mask = pd.Series(
+        True,
+        index=frame.index,
+        dtype="bool",
+    )
+
+    for _, gate_mask in (
+        _profile_gate_series(
+            frame,
+            profile,
+        )
+    ):
+
+        mask &= gate_mask
+
+    return mask.fillna(
+        False
+    )
+
+
+# ============================================================
+# PUBLIC GATE FUNNEL
+# ============================================================
+
+def profile_gate_funnel(
+    signal_log: pd.DataFrame,
+    profile: CalibrationProfile,
+) -> pd.DataFrame:
+
+    frame = _normalise_candidate_log(
+        signal_log
+    )
+
+    if frame.empty:
+
+        return pd.DataFrame(
+            columns=[
+                "gate",
+                "remaining",
+                "removed_at_gate",
+                "percent_remaining",
+            ]
+        )
+
+    surviving = pd.Series(
+        True,
+        index=frame.index,
+        dtype="bool",
+    )
+
+    rows = [
+        {
+            "gate": "Starting observations",
+            "remaining": len(frame),
+            "removed_at_gate": 0,
+            "percent_remaining": 100.0,
+        }
+    ]
+
+    prior_count = len(
+        frame
+    )
+
+    for name, gate_mask in (
+        _profile_gate_series(
+            frame,
+            profile,
+        )
+    ):
+
+        surviving &= gate_mask
+
+        remaining = int(
+            surviving.sum()
+        )
+
+        removed = (
+            prior_count
+            - remaining
+        )
+
+        rows.append(
+            {
+                "gate": name,
+                "remaining": remaining,
+                "removed_at_gate": removed,
+                "percent_remaining": round(
+                    remaining
+                    / max(
+                        len(frame),
+                        1,
+                    )
+                    * 100,
+                    2,
+                ),
+            }
+        )
+
+        prior_count = remaining
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+# ============================================================
+# PUBLIC INDEPENDENT GATE FAILURES
+# ============================================================
+
+def profile_gate_failures(
+    signal_log: pd.DataFrame,
+    profile: CalibrationProfile,
+) -> pd.DataFrame:
+
+    frame = _normalise_candidate_log(
+        signal_log
+    )
+
+    if frame.empty:
+
+        return pd.DataFrame(
+            columns=[
+                "gate",
+                "passed",
+                "failed",
+                "pass_rate_pct",
+                "failure_rate_pct",
+            ]
+        )
+
+    total = len(
+        frame
+    )
+
+    rows = []
+
+    for name, mask in (
+        _profile_gate_series(
+            frame,
+            profile,
+        )
+    ):
+
+        passed = int(
+            mask.sum()
+        )
+
+        failed = (
+            total
+            - passed
+        )
+
+        rows.append(
+            {
+                "gate": name,
+                "passed": passed,
+                "failed": failed,
+                "pass_rate_pct": round(
+                    passed
+                    / max(
+                        total,
+                        1,
+                    )
+                    * 100,
+                    2,
+                ),
+                "failure_rate_pct": round(
+                    failed
+                    / max(
+                        total,
+                        1,
+                    )
+                    * 100,
+                    2,
+                ),
+            }
+        )
+
+    return (
+        pd.DataFrame(
+            rows
+        )
+        .sort_values(
+            "failed",
+            ascending=False,
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+# ============================================================
+# SCORE DISTRIBUTION
+# ============================================================
+
+def score_distribution(
+    signal_log: pd.DataFrame,
+) -> pd.DataFrame:
+
+    frame = _normalise_candidate_log(
+        signal_log
+    )
+
+    if frame.empty:
+
+        return pd.DataFrame()
+
+    mapping = [
+        (
+            "Swing Score",
+            "_swing",
+        ),
+        (
+            "Intraday Score",
+            "_intraday",
+        ),
+        (
+            "Entry Quality",
+            "_quality",
+        ),
+    ]
+
+    percentiles = [
+        0.00,
+        0.10,
+        0.25,
+        0.50,
+        0.75,
+        0.90,
+        0.95,
+        0.99,
+        1.00,
+    ]
+
+    rows = []
+
+    for label, column in mapping:
+
+        values = (
+            pd.to_numeric(
+                frame[column],
+                errors="coerce",
+            )
+            .dropna()
+        )
+
+        if values.empty:
+
+            continue
+
+        for percentile in percentiles:
+
+            if percentile == 0:
+
+                pct_label = "Minimum"
+
+            elif percentile == 1:
+
+                pct_label = "Maximum"
+
+            else:
+
+                pct_label = (
+                    f"{int(percentile * 100)}th"
+                )
+
+            rows.append(
+                {
+                    "score": label,
+                    "observations": len(
+                        values
+                    ),
+                    "percentile": pct_label,
+                    "value": round(
+                        float(
+                            values.quantile(
+                                percentile
+                            )
+                        ),
+                        2,
+                    ),
+                }
+            )
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+# ============================================================
+# PRODUCTION GATE BOTTLENECKS
+# ============================================================
+
+def production_gate_bottlenecks(
+    signal_log: pd.DataFrame,
+) -> pd.DataFrame:
+
+    production = (
+        DEFAULT_PROFILES[0]
+    )
+
+    return profile_gate_failures(
+        signal_log,
+        production,
+    )
+
+
+# ============================================================
+# CHRONOLOGICAL SPLIT
+# ============================================================
+
+def _chronological_split(
+    frame: pd.DataFrame,
+    train_fraction=0.70,
 ):
 
-    st.header(
-        "v3.5.1 Corrected Calibration Lab"
+    if frame.empty:
+
+        return (
+            frame.copy(),
+            frame.copy(),
+        )
+
+    fraction = float(
+        train_fraction
     )
 
-    st.caption(
-        "Research only. The production scanner is unchanged."
+    fraction = max(
+        0.50,
+        min(
+            fraction,
+            0.90,
+        ),
     )
 
-    st.info(
-        "v3.5.1 fixes the hidden calibration lock: research profiles "
-        "now use their own numeric Intraday Score threshold instead of "
-        "requiring the original production intraday BUY label."
-    )
+    ordered = frame.copy()
 
-    if not isinstance(
-        backtest_result,
-        dict,
+    if (
+        "_calibration_date"
+        in ordered.columns
     ):
 
-        st.warning(
-            "Run the production backtest first."
-        )
-
-        return
-
-    signal_log = _safe_df(
-        backtest_result.get(
-            "signal_log"
-        )
-    )
-
-    if signal_log.empty:
-
-        st.warning(
-            "The latest backtest does not contain a historical signal log."
-        )
-
-        return
-
-    # ========================================================
-    # OBSERVATION SUMMARY
-    # ========================================================
-
-    st.subheader(
-        "Historical audit"
-    )
-
-    swing = pd.to_numeric(
-        signal_log.get(
-            "swing_score",
-            pd.Series(
-                dtype=float
-            ),
-        ),
-        errors="coerce",
-    )
-
-    intraday = pd.to_numeric(
-        signal_log.get(
-            "intraday_score",
-            pd.Series(
-                dtype=float
-            ),
-        ),
-        errors="coerce",
-    )
-
-    c1, c2, c3 = st.columns(
-        3
-    )
-
-    c1.metric(
-        "Observations",
-        f"{len(signal_log):,}",
-    )
-
-    c2.metric(
-        "Maximum Swing Score",
-        (
-            f"{swing.max():.1f}"
-            if not swing.dropna().empty
-            else "—"
-        ),
-    )
-
-    c3.metric(
-        "Maximum Intraday Score",
-        (
-            f"{intraday.max():.1f}"
-            if not intraday.dropna().empty
-            else "—"
-        ),
-    )
-
-    # ========================================================
-    # PRODUCTION BOTTLENECKS
-    # ========================================================
-
-    st.subheader(
-        "Current production bottlenecks"
-    )
-
-    bottlenecks = (
-        production_gate_bottlenecks(
-            signal_log
-        )
-    )
-
-    if bottlenecks.empty:
-
-        st.info(
-            "No production gate diagnostics are available."
-        )
-
-    else:
-
-        st.dataframe(
-            bottlenecks,
-            width="stretch",
-            hide_index=True,
-        )
-
-    with st.expander(
-        "Score distributions"
-    ):
-
-        distribution = score_distribution(
-            signal_log
-        )
-
-        if distribution.empty:
-
-            st.write(
-                "No score-distribution data available."
+        ordered = (
+            ordered
+            .sort_values(
+                "_calibration_date",
+                na_position="last",
             )
-
-        else:
-
-            st.dataframe(
-                distribution,
-                width="stretch",
-                hide_index=True,
+            .reset_index(
+                drop=True
             )
+        )
 
-    st.divider()
-
-    # ========================================================
-    # RUN CONTROL
-    # ========================================================
-
-    st.subheader(
-        "Run corrected threshold diagnostic"
+    cutoff = int(
+        np.floor(
+            len(ordered)
+            * fraction
+        )
     )
 
-    st.write(
-        "This test measures candidate reachability and stability. "
-        "It does not yet claim profitability."
+    cutoff = max(
+        1,
+        min(
+            cutoff,
+            len(ordered),
+        ),
     )
 
-    profile_count = st.slider(
-        "Calibration profiles",
-        min_value=2,
-        max_value=10,
-        value=min(
-            max(
-                int(
-                    default_profiles
+    train = (
+        ordered
+        .iloc[
+            :cutoff
+        ]
+        .copy()
+    )
+
+    later = (
+        ordered
+        .iloc[
+            cutoff:
+        ]
+        .copy()
+    )
+
+    return (
+        train,
+        later,
+    )
+
+
+# ============================================================
+# STABILITY FOLDS
+# ============================================================
+
+def _stability_metrics(
+    frame: pd.DataFrame,
+    profile: CalibrationProfile,
+    folds=4,
+):
+
+    if frame.empty:
+
+        return {
+            "folds": 0,
+            "positive_folds": 0,
+            "positive_folds_pct": 0.0,
+            "fold_counts": [],
+        }
+
+    folds = max(
+        2,
+        int(
+            folds
+        ),
+    )
+
+    folds = min(
+        folds,
+        len(
+            frame
+        ),
+    )
+
+    if folds < 1:
+
+        return {
+            "folds": 0,
+            "positive_folds": 0,
+            "positive_folds_pct": 0.0,
+            "fold_counts": [],
+        }
+
+    indexes = np.array_split(
+        np.arange(
+            len(frame)
+        ),
+        folds,
+    )
+
+    counts = []
+
+    for indexes_for_fold in indexes:
+
+        if len(
+            indexes_for_fold
+        ) == 0:
+
+            continue
+
+        fold = (
+            frame
+            .iloc[
+                indexes_for_fold
+            ]
+            .copy()
+        )
+
+        count = int(
+            _profile_mask(
+                fold,
+                profile,
+            ).sum()
+        )
+
+        counts.append(
+            count
+        )
+
+    positive = sum(
+        1
+        for count in counts
+        if count > 0
+    )
+
+    return {
+        "folds": len(
+            counts
+        ),
+        "positive_folds": positive,
+        "positive_folds_pct": round(
+            positive
+            / max(
+                len(
+                    counts
                 ),
-                2,
+                1,
+            )
+            * 100,
+            1,
+        ),
+        "fold_counts": counts,
+    }
+
+
+# ============================================================
+# PROFILE SELECTION
+# ============================================================
+
+def bounded_profiles(
+    max_profiles=6,
+):
+
+    count = max(
+        2,
+        min(
+            int(
+                max_profiles
             ),
-            10,
-        ),
-        step=1,
-        key="v351_profile_count",
-    )
-
-    run = st.button(
-        "RUN v3.5.1 CORRECTED CALIBRATION",
-        type="primary",
-        width="stretch",
-        key="run_v351_calibration",
-    )
-
-    if run:
-
-        progress = st.progress(
-            0
-        )
-
-        status = st.status(
-            "Starting corrected calibration...",
-            expanded=True,
-        )
-
-        def update(
-            completed,
-            total,
-            profile_name,
-        ):
-
-            pct = int(
-                completed
-                / max(
-                    total,
-                    1,
-                )
-                * 100
-            )
-
-            progress.progress(
-                min(
-                    pct,
-                    100,
-                )
-            )
-
-            status.write(
-                f"{completed}/{total}: {profile_name}"
-            )
-
-        try:
-
-            result = run_fast_calibration(
-                signal_log,
-                max_profiles=profile_count,
-                train_fraction=0.70,
-                stability_folds=4,
-                progress_callback=update,
-            )
-
-            st.session_state[
-                "v351_calibration_result"
-            ] = result
-
-            progress.progress(
-                100
-            )
-
-            status.update(
-                label="v3.5.1 corrected calibration complete.",
-                state="complete",
-                expanded=False,
-            )
-
-        except Exception as exc:
-
-            status.update(
-                label="Calibration failed.",
-                state="error",
-            )
-
-            st.exception(
-                exc
-            )
-
-            return
-
-    # ========================================================
-    # RESULTS
-    # ========================================================
-
-    result = st.session_state.get(
-        "v351_calibration_result"
-    )
-
-    if not isinstance(
-        result,
-        dict,
-    ):
-
-        st.info(
-            "Run the corrected calibration above."
-        )
-
-        return
-
-    if result.get(
-        "status"
-    ) != "COMPLETE":
-
-        st.warning(
-            result.get(
-                "message",
-                "Calibration did not complete.",
-            )
-        )
-
-        return
-
-    st.divider()
-
-    st.success(
-        result.get(
-            "message",
-            "Calibration complete.",
-        )
-    )
-
-    r1, r2, r3 = st.columns(
-        3
-    )
-
-    r1.metric(
-        "Candidate observations",
-        result.get(
-            "candidate_count",
-            0,
+            len(
+                DEFAULT_PROFILES
+            ),
         ),
     )
 
-    r2.metric(
-        "In-sample observations",
-        result.get(
-            "in_sample_count",
-            0,
-        ),
+    return (
+        DEFAULT_PROFILES[
+            :count
+        ]
     )
 
-    r3.metric(
-        "Later-period observations",
-        result.get(
-            "later_period_count",
-            0,
-        ),
+
+# ============================================================
+# FAST CALIBRATION ENGINE
+# ============================================================
+
+def run_fast_calibration(
+    signal_log: pd.DataFrame,
+    max_profiles=6,
+    train_fraction=0.70,
+    stability_folds=4,
+    progress_callback=None,
+):
+
+    frame = (
+        _normalise_candidate_log(
+            signal_log
+        )
     )
 
-    # ========================================================
-    # REACHABILITY FLAGS
-    # ========================================================
+    if frame.empty:
 
-    if result.get(
-        "production_swing_reachable",
-        False,
+        return {
+            "status": "NO_DATA",
+            "summary": pd.DataFrame(),
+            "profile_results": {},
+            "candidate_count": 0,
+            "in_sample_count": 0,
+            "later_period_count": 0,
+            "production_swing_reachable": False,
+            "production_intraday_reachable": False,
+            "any_research_candidates": False,
+            "best_profile": None,
+            "message": (
+                "No usable historical candidate observations "
+                "were available."
+            ),
+        }
+
+    profiles = bounded_profiles(
+        max_profiles
+    )
+
+    train_frame, later_frame = (
+        _chronological_split(
+            frame,
+            train_fraction=train_fraction,
+        )
+    )
+
+    rows = []
+
+    results = {}
+
+    total_profiles = len(
+        profiles
+    )
+
+    for index, profile in enumerate(
+        profiles,
+        start=1,
     ):
 
-        st.success(
-            "The production Swing Score threshold of 85 was reached "
-            "at least once."
+        if progress_callback is not None:
+
+            progress_callback(
+                index,
+                total_profiles,
+                profile.name,
+            )
+
+        full_mask = (
+            _profile_mask(
+                frame,
+                profile,
+            )
         )
 
-    else:
-
-        st.warning(
-            "The production Swing Score threshold of 85 was never reached."
+        train_mask = (
+            _profile_mask(
+                train_frame,
+                profile,
+            )
         )
 
-    if result.get(
-        "production_intraday_reachable",
-        False,
-    ):
-
-        st.success(
-            "The production Intraday Score threshold of 85 was reached "
-            "at least once."
+        later_mask = (
+            _profile_mask(
+                later_frame,
+                profile,
+            )
         )
 
-    else:
-
-        st.warning(
-            "The production Intraday Score threshold of 85 was never reached."
+        all_candidates = (
+            frame[
+                full_mask
+            ]
+            .copy()
         )
 
-    if result.get(
-        "any_research_candidates",
-        False,
-    ):
-
-        st.success(
-            "At least one corrected research profile produced candidates. "
-            "The hidden production-label lock has been removed successfully."
+        train_candidates = (
+            train_frame[
+                train_mask
+            ]
+            .copy()
         )
 
-    else:
-
-        st.error(
-            "Even after removing the production intraday BUY-label lock, "
-            "the tested research profiles still produced zero candidates. "
-            "Use the gate funnels below to identify the next actual bottleneck."
+        later_candidates = (
+            later_frame[
+                later_mask
+            ]
+            .copy()
         )
 
-    # ========================================================
-    # PROFILE RESULTS
-    # ========================================================
-
-    summary = _safe_df(
-        result.get(
-            "summary"
-        )
-    )
-
-    if summary.empty:
-
-        st.warning(
-            "No profile summary was produced."
+        all_count = len(
+            all_candidates
         )
 
-        return
+        train_count = len(
+            train_candidates
+        )
 
-    st.subheader(
-        "Candidate-stability profiles"
-    )
+        later_count = len(
+            later_candidates
+        )
 
-    st.caption(
-        "The ordering favors profiles that continue producing candidates "
-        "in later periods and across multiple chronological folds. "
-        "This is deliberately not a profitability ranking."
-    )
+        full_rate = (
+            all_count
+            / max(
+                len(frame),
+                1,
+            )
+        )
 
-    for _, row in summary.iterrows():
+        train_rate = (
+            train_count
+            / max(
+                len(train_frame),
+                1,
+            )
+        )
 
-        _profile_card(
+        later_rate = (
+            later_count
+            / max(
+                len(later_frame),
+                1,
+            )
+            if len(
+                later_frame
+            )
+            else 0.0
+        )
+
+        stability_ratio = (
+            later_rate
+            / train_rate
+            if train_rate > 0
+            else 0.0
+        )
+
+        fold_metrics = (
+            _stability_metrics(
+                frame,
+                profile,
+                folds=stability_folds,
+            )
+        )
+
+        row = {
+            "profile": profile.name,
+            "production_control": (
+                profile.production_control
+            ),
+            "swing_threshold": (
+                profile.swing_score
+            ),
+            "intraday_threshold": (
+                profile.intraday_score
+            ),
+            "entry_quality": (
+                profile.entry_quality
+            ),
+            "market_score": (
+                profile.market_score
+            ),
+            "leadership": (
+                profile.leadership
+            ),
+            "max_distribution_days": (
+                profile.max_distribution_days
+            ),
+            "reward_risk": (
+                profile.reward_risk
+            ),
+            "all_candidates": (
+                all_count
+            ),
+            "candidate_rate_pct": round(
+                full_rate
+                * 100,
+                3,
+            ),
+            "in_sample_candidates": (
+                train_count
+            ),
+            "later_period_candidates": (
+                later_count
+            ),
+            "later_candidate_rate_pct": round(
+                later_rate
+                * 100,
+                3,
+            ),
+            "stability_ratio": round(
+                stability_ratio,
+                3,
+            ),
+            "candidate_positive_folds": (
+                fold_metrics[
+                    "positive_folds"
+                ]
+            ),
+            "candidate_positive_folds_pct": (
+                fold_metrics[
+                    "positive_folds_pct"
+                ]
+            ),
+        }
+
+        rows.append(
             row
         )
 
+        results[
+            profile.name
+        ] = {
+            "profile": asdict(
+                profile
+            ),
+            "all_candidates": (
+                all_candidates
+            ),
+            "in_sample_candidates": (
+                train_candidates
+            ),
+            "later_period_candidates": (
+                later_candidates
+            ),
+            "gate_funnel": (
+                profile_gate_funnel(
+                    signal_log,
+                    profile,
+                )
+            ),
+            "gate_failures": (
+                profile_gate_failures(
+                    signal_log,
+                    profile,
+                )
+            ),
+            "fold_counts": (
+                fold_metrics[
+                    "fold_counts"
+                ]
+            ),
+            "metrics": row,
+        }
+
+    summary = pd.DataFrame(
+        rows
+    )
+
     # ========================================================
-    # FULL TABLE
+    # RANK RESEARCH PROFILES
     # ========================================================
 
-    with st.expander(
-        "Full profile comparison table"
-    ):
+    if not summary.empty:
 
-        st.dataframe(
-            summary,
-            width="stretch",
-            hide_index=True,
+        summary[
+            "_has_later"
+        ] = (
+            summary[
+                "later_period_candidates"
+            ]
+            > 0
+        ).astype(int)
+
+        summary[
+            "_has_full"
+        ] = (
+            summary[
+                "all_candidates"
+            ]
+            > 0
+        ).astype(int)
+
+        summary[
+            "_strictness"
+        ] = (
+            summary[
+                "swing_threshold"
+            ]
+            + summary[
+                "intraday_threshold"
+            ]
+            + (
+                summary[
+                    "entry_quality"
+                ]
+                * 2
+            )
+        )
+
+        summary = (
+            summary
+            .sort_values(
+                [
+                    "_has_later",
+                    "candidate_positive_folds_pct",
+                    "later_period_candidates",
+                    "_has_full",
+                    "stability_ratio",
+                    "_strictness",
+                ],
+                ascending=[
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                ],
+            )
+            .drop(
+                columns=[
+                    "_has_later",
+                    "_has_full",
+                    "_strictness",
+                ]
+            )
+            .reset_index(
+                drop=True
+            )
         )
 
     # ========================================================
-    # BEST PROFILE DIAGNOSTICS
+    # REACHABILITY
     # ========================================================
 
-    best = result.get(
-        "best_profile"
+    production_swing_reachable = bool(
+        (
+            frame[
+                "_swing"
+            ]
+            >= PRODUCTION_SWING_SCORE
+        ).any()
     )
 
-    st.divider()
-
-    st.subheader(
-        "Next research profile"
+    production_intraday_reachable = bool(
+        (
+            frame[
+                "_intraday"
+            ]
+            >= PRODUCTION_INTRADAY_SCORE
+        ).any()
     )
 
-    if not best:
-
-        st.warning(
-            "No research profile produced candidates in both the earlier "
-            "and later chronological portions. Do not change live thresholds."
-        )
-
-        # If nothing passed, inspect the loosest tested profile.
-        research_rows = summary[
+    research_rows = (
+        summary[
             ~summary[
                 "production_control"
             ]
         ]
+        if not summary.empty
+        else pd.DataFrame()
+    )
 
-        if research_rows.empty:
+    any_research_candidates = bool(
+        not research_rows.empty
+        and (
+            research_rows[
+                "all_candidates"
+            ]
+            > 0
+        ).any()
+    )
 
-            return
+    best_profile = None
 
-        selected_name = (
-            research_rows.iloc[
-                -1
-            ][
-                "profile"
+    if not research_rows.empty:
+
+        viable = (
+            research_rows[
+                (
+                    research_rows[
+                        "all_candidates"
+                    ]
+                    > 0
+                )
+                &
+                (
+                    research_rows[
+                        "later_period_candidates"
+                    ]
+                    > 0
+                )
             ]
         )
 
-    else:
+        if not viable.empty:
 
-        selected_name = best.get(
-            "profile"
-        )
-
-        st.info(
-            f"Best candidate-stability profile in this test: "
-            f"**{selected_name}**"
-        )
-
-    profile_results = result.get(
-        "profile_results",
-        {}
-    )
-
-    selected = profile_results.get(
-        selected_name,
-        {}
-    )
-
-    # ========================================================
-    # SEQUENTIAL FUNNEL
-    # ========================================================
-
-    st.markdown(
-        f"### Gate funnel — {selected_name}"
-    )
-
-    st.caption(
-        "This shows the exact stage at which candidates disappear."
-    )
-
-    funnel = _safe_df(
-        selected.get(
-            "gate_funnel"
-        )
-    )
-
-    if not funnel.empty:
-
-        st.dataframe(
-            funnel,
-            width="stretch",
-            hide_index=True,
-        )
-
-        zero_rows = funnel[
-            funnel[
-                "remaining"
-            ]
-            == 0
-        ]
-
-        if not zero_rows.empty:
-
-            first_zero = zero_rows.iloc[
-                0
-            ]
-
-            st.error(
-                "First gate reducing the surviving candidate pool to zero: "
-                f"**{first_zero.get('gate')}**"
+            best_profile = (
+                viable
+                .iloc[0]
+                .to_dict()
             )
 
-    # ========================================================
-    # INDEPENDENT FAILURES
-    # ========================================================
-
-    st.markdown(
-        "### Independent gate failures"
-    )
-
-    failures = _safe_df(
-        selected.get(
-            "gate_failures"
-        )
-    )
-
-    if not failures.empty:
-
-        st.dataframe(
-            failures,
-            width="stretch",
-            hide_index=True,
-        )
-
-    # ========================================================
-    # CANDIDATES
-    # ========================================================
-
-    candidates = _safe_df(
-        selected.get(
-            "all_candidates"
-        )
-    )
-
-    if not candidates.empty:
-
-        st.markdown(
-            "### Research candidates"
-        )
-
-        display_columns = [
-            column
-            for column in [
-                "symbol",
-                "session",
-                "signal_time",
-                "swing_score",
-                "intraday_score",
-                "entry_quality",
-                "market_score",
-                "leadership_percentile",
-                "distribution_days",
-                "reward_risk",
-                "setup",
-            ]
-            if column
-            in candidates.columns
-        ]
-
-        st.dataframe(
-            candidates[
-                display_columns
-            ].head(
-                100
-            ),
-            width="stretch",
-            hide_index=True,
-        )
-
-    # ========================================================
-    # DOWNLOAD
-    # ========================================================
-
-    st.download_button(
-        "Download v3.5.1 calibration summary",
-        data=(
-            summary
-            .to_csv(
-                index=False
-            )
-            .encode(
-                "utf-8"
-            )
+    return {
+        "status": "COMPLETE",
+        "summary": summary,
+        "profile_results": results,
+        "candidate_count": len(
+            frame
         ),
-        file_name=(
-            "v3_5_1_calibration_summary.csv"
+        "in_sample_count": len(
+            train_frame
         ),
-        mime="text/csv",
-        width="stretch",
+        "later_period_count": len(
+            later_frame
+        ),
+        "production_swing_reachable": (
+            production_swing_reachable
+        ),
+        "production_intraday_reachable": (
+            production_intraday_reachable
+        ),
+        "any_research_candidates": (
+            any_research_candidates
+        ),
+        "best_profile": (
+            best_profile
+        ),
+        "profiles_tested": len(
+            profiles
+        ),
+        "message": (
+            f"Completed {len(profiles)} bounded calibration "
+            f"profiles across {len(frame):,} cached historical "
+            f"observations."
+        ),
+    }
+
+
+# ============================================================
+# BACKWARD-COMPATIBILITY HELPERS
+# ============================================================
+
+def calibration_summary(
+    signal_log: pd.DataFrame,
+    max_profiles=6,
+):
+
+    result = run_fast_calibration(
+        signal_log,
+        max_profiles=max_profiles,
     )
 
-    st.divider()
-
-    st.warning(
-        "Do not change the live scanner thresholds from this screen alone. "
-        "Once a research profile produces enough candidates across multiple "
-        "periods, the next step is portfolio replay and profitability validation."
+    return result.get(
+        "summary",
+        pd.DataFrame(),
     )
