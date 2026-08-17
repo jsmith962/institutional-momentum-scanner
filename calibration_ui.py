@@ -4,7 +4,7 @@ Calibration UI.
 
 Research only.
 
-v3.5.1 specifically distinguishes:
+This version is designed to work with the corrected v3.5.1 calibration engine.
 
 PRODUCTION CONTROL
     Uses the original production intraday BUY label.
@@ -13,8 +13,14 @@ RESEARCH PROFILES
     Use their own numeric Intraday Score threshold and do not remain
     artificially blocked by the production classifier's BUY label.
 
-The UI also displays a profile-specific sequential gate funnel so we can
-identify exactly which remaining gate is preventing candidates.
+The UI also displays:
+- Production bottlenecks
+- Score distributions
+- Corrected threshold calibration
+- Candidate stability
+- Sequential gate funnels
+- Independent gate failures
+- Research candidates
 """
 
 from __future__ import annotations
@@ -23,9 +29,6 @@ import pandas as pd
 import streamlit as st
 
 from calibration import (
-    DEFAULT_PROFILES,
-    profile_gate_failures,
-    profile_gate_funnel,
     production_gate_bottlenecks,
     run_fast_calibration,
     score_distribution,
@@ -36,52 +39,30 @@ from calibration import (
 # HELPERS
 # ============================================================
 
-def _safe_df(
-    value,
-):
-
-    if isinstance(
-        value,
-        pd.DataFrame,
-    ):
-
+def _safe_df(value):
+    if isinstance(value, pd.DataFrame):
         return value
 
     return pd.DataFrame()
 
 
-def _number(
-    value,
-    digits=1,
-):
-
+def _number(value, digits=1):
     try:
-
-        if pd.isna(
-            value
-        ):
-
+        if pd.isna(value):
             return "—"
 
-        number = float(
-            value
-        )
+        number = float(value)
 
         if digits == 0:
-
             return f"{number:,.0f}"
 
         return f"{number:,.{digits}f}"
 
     except Exception:
-
         return "—"
 
 
-def _profile_card(
-    row,
-):
-
+def _profile_card(row):
     production = bool(
         row.get(
             "production_control",
@@ -89,31 +70,24 @@ def _profile_card(
         )
     )
 
-    with st.container(
-        border=True
-    ):
-
+    with st.container(border=True):
         st.markdown(
             f"### {row.get('profile', 'Profile')}"
         )
 
         if production:
-
             st.caption(
                 "Production control: requires the original production "
                 "intraday BUY label."
             )
 
         else:
-
             st.caption(
                 "Research profile: uses its own numeric Intraday Score "
-                "threshold and does not require the old production BUY label."
+                "threshold and does not require the production BUY label."
             )
 
-        c1, c2, c3 = st.columns(
-            3
-        )
+        c1, c2, c3 = st.columns(3)
 
         c1.metric(
             "Swing threshold",
@@ -145,9 +119,7 @@ def _profile_card(
             ),
         )
 
-        c4, c5 = st.columns(
-            2
-        )
+        c4, c5 = st.columns(2)
 
         c4.metric(
             "All candidates",
@@ -169,9 +141,7 @@ def _profile_card(
             ),
         )
 
-        c6, c7 = st.columns(
-            2
-        )
+        c6, c7 = st.columns(2)
 
         c6.metric(
             "Candidate-positive folds",
@@ -191,43 +161,43 @@ def _profile_card(
         )
 
         st.caption(
-            "Candidate stability only. This profile has not been "
-            "proven profitable by this fast diagnostic."
+            "Candidate stability only. This profile has not yet been "
+            "proven profitable."
         )
 
 
 # ============================================================
-# MAIN UI
+# MAIN CALIBRATION UI
 # ============================================================
 
 def render_calibration_lab(
     backtest_result: dict,
     default_profiles=6,
 ):
-
     st.header(
         "v3.5.1 Corrected Calibration Lab"
     )
 
     st.caption(
-        "Research only. The production scanner is unchanged."
+        "Research only. The live production scanner remains unchanged."
     )
 
     st.info(
-        "v3.5.1 fixes the hidden calibration lock: research profiles "
-        "now use their own numeric Intraday Score threshold instead of "
-        "requiring the original production intraday BUY label."
+        "Research profiles use their own numeric Intraday Score threshold "
+        "instead of being forced to pass the production intraday BUY label."
     )
+
+    # ========================================================
+    # REQUIRE A BACKTEST RESULT
+    # ========================================================
 
     if not isinstance(
         backtest_result,
         dict,
     ):
-
         st.warning(
             "Run the production backtest first."
         )
-
         return
 
     signal_log = _safe_df(
@@ -237,15 +207,14 @@ def render_calibration_lab(
     )
 
     if signal_log.empty:
-
         st.warning(
-            "The latest backtest does not contain a historical signal log."
+            "The latest backtest does not contain a usable historical "
+            "signal log."
         )
-
         return
 
     # ========================================================
-    # OBSERVATION SUMMARY
+    # HISTORICAL AUDIT
     # ========================================================
 
     st.subheader(
@@ -255,9 +224,7 @@ def render_calibration_lab(
     swing = pd.to_numeric(
         signal_log.get(
             "swing_score",
-            pd.Series(
-                dtype=float
-            ),
+            pd.Series(dtype=float),
         ),
         errors="coerce",
     )
@@ -265,16 +232,12 @@ def render_calibration_lab(
     intraday = pd.to_numeric(
         signal_log.get(
             "intraday_score",
-            pd.Series(
-                dtype=float
-            ),
+            pd.Series(dtype=float),
         ),
         errors="coerce",
     )
 
-    c1, c2, c3 = st.columns(
-        3
-    )
+    c1, c2, c3 = st.columns(3)
 
     c1.metric(
         "Observations",
@@ -307,42 +270,55 @@ def render_calibration_lab(
         "Current production bottlenecks"
     )
 
-    bottlenecks = (
-        production_gate_bottlenecks(
-            signal_log
+    try:
+        bottlenecks = (
+            production_gate_bottlenecks(
+                signal_log
+            )
         )
-    )
+    except Exception as exc:
+        bottlenecks = pd.DataFrame()
+
+        st.warning(
+            f"Production bottleneck analysis could not be generated: {exc}"
+        )
 
     if bottlenecks.empty:
-
         st.info(
             "No production gate diagnostics are available."
         )
 
     else:
-
         st.dataframe(
             bottlenecks,
             width="stretch",
             hide_index=True,
         )
 
+    # ========================================================
+    # SCORE DISTRIBUTIONS
+    # ========================================================
+
     with st.expander(
         "Score distributions"
     ):
+        try:
+            distribution = score_distribution(
+                signal_log
+            )
+        except Exception as exc:
+            distribution = pd.DataFrame()
 
-        distribution = score_distribution(
-            signal_log
-        )
+            st.warning(
+                f"Score distribution could not be generated: {exc}"
+            )
 
         if distribution.empty:
-
             st.write(
                 "No score-distribution data available."
             )
 
         else:
-
             st.dataframe(
                 distribution,
                 width="stretch",
@@ -352,7 +328,7 @@ def render_calibration_lab(
     st.divider()
 
     # ========================================================
-    # RUN CONTROL
+    # CALIBRATION CONTROLS
     # ========================================================
 
     st.subheader(
@@ -370,9 +346,7 @@ def render_calibration_lab(
         max_value=10,
         value=min(
             max(
-                int(
-                    default_profiles
-                ),
+                int(default_profiles),
                 2,
             ),
             10,
@@ -388,11 +362,12 @@ def render_calibration_lab(
         key="run_v351_calibration",
     )
 
-    if run:
+    # ========================================================
+    # RUN CALIBRATION
+    # ========================================================
 
-        progress = st.progress(
-            0
-        )
+    if run:
+        progress = st.progress(0)
 
         status = st.status(
             "Starting corrected calibration...",
@@ -404,7 +379,6 @@ def render_calibration_lab(
             total,
             profile_name,
         ):
-
             pct = int(
                 completed
                 / max(
@@ -426,7 +400,6 @@ def render_calibration_lab(
             )
 
         try:
-
             result = run_fast_calibration(
                 signal_log,
                 max_profiles=profile_count,
@@ -439,21 +412,24 @@ def render_calibration_lab(
                 "v351_calibration_result"
             ] = result
 
-            progress.progress(
-                100
-            )
+            progress.progress(100)
 
             status.update(
-                label="v3.5.1 corrected calibration complete.",
+                label=(
+                    "v3.5.1 corrected calibration complete."
+                ),
                 state="complete",
                 expanded=False,
             )
 
         except Exception as exc:
-
             status.update(
                 label="Calibration failed.",
                 state="error",
+            )
+
+            st.error(
+                "The calibration engine returned an error."
             )
 
             st.exception(
@@ -463,7 +439,7 @@ def render_calibration_lab(
             return
 
     # ========================================================
-    # RESULTS
+    # LOAD SAVED RESULT
     # ========================================================
 
     result = st.session_state.get(
@@ -474,24 +450,20 @@ def render_calibration_lab(
         result,
         dict,
     ):
-
         st.info(
             "Run the corrected calibration above."
         )
-
         return
 
     if result.get(
         "status"
     ) != "COMPLETE":
-
         st.warning(
             result.get(
                 "message",
                 "Calibration did not complete.",
             )
         )
-
         return
 
     st.divider()
@@ -503,9 +475,11 @@ def render_calibration_lab(
         )
     )
 
-    r1, r2, r3 = st.columns(
-        3
-    )
+    # ========================================================
+    # SAMPLE COUNTS
+    # ========================================================
+
+    r1, r2, r3 = st.columns(3)
 
     r1.metric(
         "Candidate observations",
@@ -523,70 +497,81 @@ def render_calibration_lab(
         ),
     )
 
-    r3.metric(
-        "Later-period observations",
+    later_period_count = result.get(
+        "later_period_count",
         result.get(
-            "later_period_count",
+            "out_of_sample_count",
             0,
         ),
     )
 
+    r3.metric(
+        "Later-period observations",
+        later_period_count,
+    )
+
     # ========================================================
-    # REACHABILITY FLAGS
+    # PRODUCTION REACHABILITY
     # ========================================================
 
     if result.get(
         "production_swing_reachable",
-        False,
+        result.get(
+            "production_reachable",
+            False,
+        ),
     ):
-
         st.success(
             "The production Swing Score threshold of 85 was reached "
             "at least once."
         )
 
     else:
-
         st.warning(
             "The production Swing Score threshold of 85 was never reached."
         )
 
-    if result.get(
-        "production_intraday_reachable",
-        False,
-    ):
+    production_intraday_reachable = result.get(
+        "production_intraday_reachable"
+    )
 
-        st.success(
-            "The production Intraday Score threshold of 85 was reached "
-            "at least once."
-        )
+    if production_intraday_reachable is not None:
+        if production_intraday_reachable:
+            st.success(
+                "The production Intraday Score threshold of 85 was reached "
+                "at least once."
+            )
 
-    else:
-
-        st.warning(
-            "The production Intraday Score threshold of 85 was never reached."
-        )
-
-    if result.get(
-        "any_research_candidates",
-        False,
-    ):
-
-        st.success(
-            "At least one corrected research profile produced candidates. "
-            "The hidden production-label lock has been removed successfully."
-        )
-
-    else:
-
-        st.error(
-            "Even after removing the production intraday BUY-label lock, "
-            "the tested research profiles still produced zero candidates. "
-            "Use the gate funnels below to identify the next actual bottleneck."
-        )
+        else:
+            st.warning(
+                "The production Intraday Score threshold of 85 was never reached."
+            )
 
     # ========================================================
-    # PROFILE RESULTS
+    # RESEARCH CANDIDATE CHECK
+    # ========================================================
+
+    any_research_candidates = result.get(
+        "any_research_candidates"
+    )
+
+    if any_research_candidates is not None:
+        if any_research_candidates:
+            st.success(
+                "At least one corrected research profile produced candidates. "
+                "The production intraday-label lock is no longer blocking "
+                "research testing."
+            )
+
+        else:
+            st.error(
+                "The tested research profiles still produced zero candidates. "
+                "The profile gate funnels below should identify the next "
+                "actual bottleneck."
+            )
+
+    # ========================================================
+    # PROFILE SUMMARY
     # ========================================================
 
     summary = _safe_df(
@@ -596,11 +581,9 @@ def render_calibration_lab(
     )
 
     if summary.empty:
-
         st.warning(
             "No profile summary was produced."
         )
-
         return
 
     st.subheader(
@@ -608,13 +591,12 @@ def render_calibration_lab(
     )
 
     st.caption(
-        "The ordering favors profiles that continue producing candidates "
-        "in later periods and across multiple chronological folds. "
-        "This is deliberately not a profitability ranking."
+        "Ordering favors profiles that continue producing candidates "
+        "in later periods and across chronological stability folds. "
+        "This is not a profitability ranking."
     )
 
     for _, row in summary.iterrows():
-
         _profile_card(
             row
         )
@@ -626,7 +608,6 @@ def render_calibration_lab(
     with st.expander(
         "Full profile comparison table"
     ):
-
         st.dataframe(
             summary,
             width="stretch",
@@ -634,7 +615,7 @@ def render_calibration_lab(
         )
 
     # ========================================================
-    # BEST PROFILE DIAGNOSTICS
+    # CHOOSE PROFILE FOR DIAGNOSTICS
     # ========================================================
 
     best = result.get(
@@ -647,55 +628,84 @@ def render_calibration_lab(
         "Next research profile"
     )
 
-    if not best:
+    selected_name = None
 
-        st.warning(
-            "No research profile produced candidates in both the earlier "
-            "and later chronological portions. Do not change live thresholds."
+    if isinstance(
+        best,
+        dict,
+    ):
+        selected_name = best.get(
+            "profile"
         )
 
-        # If nothing passed, inspect the loosest tested profile.
-        research_rows = summary[
-            ~summary[
-                "production_control"
+        if selected_name:
+            st.info(
+                "Best candidate-stability profile in this test: "
+                f"**{selected_name}**"
+            )
+
+    if not selected_name:
+        st.warning(
+            "No research profile clearly survived both the earlier and "
+            "later chronological portions. Do not change live thresholds."
+        )
+
+        if "production_control" in summary.columns:
+            research_rows = summary[
+                ~summary[
+                    "production_control"
+                ].fillna(
+                    False
+                ).astype(
+                    bool
+                )
             ]
-        ]
+
+        else:
+            research_rows = summary.copy()
 
         if research_rows.empty:
-
             return
 
         selected_name = (
             research_rows.iloc[
                 -1
-            ][
+            ].get(
                 "profile"
-            ]
+            )
         )
 
-    else:
+    if not selected_name:
+        return
 
-        selected_name = best.get(
-            "profile"
-        )
-
-        st.info(
-            f"Best candidate-stability profile in this test: "
-            f"**{selected_name}**"
-        )
+    # ========================================================
+    # PROFILE-SPECIFIC DETAILS
+    # ========================================================
 
     profile_results = result.get(
         "profile_results",
         {}
     )
 
+    if not isinstance(
+        profile_results,
+        dict,
+    ):
+        profile_results = {}
+
     selected = profile_results.get(
         selected_name,
         {}
     )
 
+    if not isinstance(
+        selected,
+        dict,
+    ):
+        selected = {}
+
     # ========================================================
-    # SEQUENTIAL FUNNEL
+    # SEQUENTIAL GATE FUNNEL
     # ========================================================
 
     st.markdown(
@@ -712,34 +722,50 @@ def render_calibration_lab(
         )
     )
 
-    if not funnel.empty:
+    if funnel.empty:
+        st.info(
+            "No sequential gate funnel is available for this profile."
+        )
 
+    else:
         st.dataframe(
             funnel,
             width="stretch",
             hide_index=True,
         )
 
-        zero_rows = funnel[
-            funnel[
-                "remaining"
-            ]
-            == 0
-        ]
-
-        if not zero_rows.empty:
-
-            first_zero = zero_rows.iloc[
-                0
-            ]
-
-            st.error(
-                "First gate reducing the surviving candidate pool to zero: "
-                f"**{first_zero.get('gate')}**"
+        if (
+            "remaining"
+            in funnel.columns
+        ):
+            remaining = pd.to_numeric(
+                funnel[
+                    "remaining"
+                ],
+                errors="coerce",
             )
 
+            zero_rows = funnel[
+                remaining.eq(
+                    0
+                )
+            ]
+
+            if not zero_rows.empty:
+                first_zero = (
+                    zero_rows.iloc[
+                        0
+                    ]
+                )
+
+                st.error(
+                    "First gate reducing the surviving candidate pool "
+                    "to zero: "
+                    f"**{first_zero.get('gate', 'Unknown gate')}**"
+                )
+
     # ========================================================
-    # INDEPENDENT FAILURES
+    # INDEPENDENT GATE FAILURES
     # ========================================================
 
     st.markdown(
@@ -752,8 +778,12 @@ def render_calibration_lab(
         )
     )
 
-    if not failures.empty:
+    if failures.empty:
+        st.info(
+            "No independent gate-failure table is available."
+        )
 
+    else:
         st.dataframe(
             failures,
             width="stretch",
@@ -761,7 +791,7 @@ def render_calibration_lab(
         )
 
     # ========================================================
-    # CANDIDATES
+    # RESEARCH CANDIDATES
     # ========================================================
 
     candidates = _safe_df(
@@ -771,7 +801,6 @@ def render_calibration_lab(
     )
 
     if not candidates.empty:
-
         st.markdown(
             "### Research candidates"
         )
@@ -795,15 +824,25 @@ def render_calibration_lab(
             in candidates.columns
         ]
 
-        st.dataframe(
-            candidates[
-                display_columns
-            ].head(
-                100
-            ),
-            width="stretch",
-            hide_index=True,
-        )
+        if display_columns:
+            st.dataframe(
+                candidates[
+                    display_columns
+                ].head(
+                    100
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+        else:
+            st.dataframe(
+                candidates.head(
+                    100
+                ),
+                width="stretch",
+                hide_index=True,
+            )
 
     # ========================================================
     # DOWNLOAD
@@ -830,7 +869,8 @@ def render_calibration_lab(
     st.divider()
 
     st.warning(
-        "Do not change the live scanner thresholds from this screen alone. "
-        "Once a research profile produces enough candidates across multiple "
-        "periods, the next step is portfolio replay and profitability validation."
+        "Do not change the live scanner thresholds based on candidate "
+        "reachability alone. A research profile must next be tested through "
+        "the portfolio simulator for trade count, expectancy, profit factor, "
+        "drawdown and out-of-sample performance."
     )
