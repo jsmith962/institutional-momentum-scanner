@@ -18,6 +18,21 @@ from backtest import swing_backtest
 
 from calibration_ui import render_calibration_lab
 
+# ============================================================
+# OPTIONAL v3.6 RESEARCH UI
+# ============================================================
+
+try:
+    from threshold_discovery_ui import render_threshold_discovery_lab
+
+    V36_RESEARCH_AVAILABLE = True
+    V36_IMPORT_ERROR = None
+
+except Exception as exc:
+    render_threshold_discovery_lab = None
+    V36_RESEARCH_AVAILABLE = False
+    V36_IMPORT_ERROR = str(exc)
+
 from market_data import (
     eligible_us_equity_universe,
     get_bars,
@@ -43,24 +58,25 @@ load_dotenv()
 ET = ZoneInfo("America/New_York")
 
 st.set_page_config(
-    page_title="Institutional Swing Scanner v3.5",
+    page_title="Institutional Swing Scanner v3.6",
     layout="wide",
 )
 
-st.title("Institutional Swing Scanner v3.5")
+st.title("Institutional Swing Scanner v3.6")
 
 st.caption(
     "Full U.S. market | catalyst-gap protection | daily + intraday "
     "confirmation | SMS alerts | production-equivalent backtesting | "
-    "multi-fold walk-forward validation | fast portfolio-replay calibration | "
-    "no live orders"
+    "multi-fold walk-forward validation | fast calibration | "
+    "empirical threshold discovery | no live orders"
 )
 
-tab1, tab2, tab3 = st.tabs(
+tab1, tab2, tab3, tab4 = st.tabs(
     [
         "Live Swing Scanner",
         "$2,000 Swing Backtester",
         "Calibration & Validation",
+        "v3.6 Research",
     ]
 )
 
@@ -74,6 +90,12 @@ if "latest_backtest_result" not in st.session_state:
 
 if "latest_backtest_settings" not in st.session_state:
     st.session_state.latest_backtest_settings = None
+
+if "latest_backtest_daily_bars" not in st.session_state:
+    st.session_state.latest_backtest_daily_bars = None
+
+if "latest_backtest_market_daily" not in st.session_state:
+    st.session_state.latest_backtest_market_daily = None
 
 
 # ============================================================
@@ -1993,7 +2015,7 @@ with tab1:
                     ).encode(
                         "utf-8"
                     ),
-                    file_name="v3_5_swing_scan_latest.csv",
+                    file_name="v3_6_swing_scan_latest.csv",
                     mime="text/csv",
                     width="stretch",
                 )
@@ -2027,7 +2049,7 @@ with tab2:
     )
 
     st.info(
-        "v3.5 reconstructs the daily and intraday decision chain using "
+        "v3.6 reconstructs the daily and intraday decision chain using "
         "historical data available at the configured scan time. "
         "Signals are evaluated before simulated entries."
     )
@@ -2162,8 +2184,8 @@ with tab2:
     st.divider()
 
     st.info(
-        "The production backtest runs first. Calibration is performed "
-        "separately from the cached candidate log."
+        "The production backtest runs first. Calibration and v3.6 research "
+        "are performed separately from the cached historical audit."
     )
 
     if st.button(
@@ -2382,7 +2404,7 @@ with tab2:
             ].copy()
 
             with st.spinner(
-                "Running production-equivalent v3.5 backtest..."
+                "Running production-equivalent v3.6 backtest..."
             ):
 
                 res = swing_backtest(
@@ -2400,8 +2422,20 @@ with tab2:
                     commission_bps=commission_bps,
                 )
 
+            # =================================================
+            # SAVE COMPLETE RESEARCH DATASET
+            # =================================================
+
             st.session_state.latest_backtest_result = (
                 res
+            )
+
+            st.session_state.latest_backtest_daily_bars = (
+                daily_history.copy()
+            )
+
+            st.session_state.latest_backtest_market_daily = (
+                market_daily.copy()
             )
 
             st.session_state.latest_backtest_settings = {
@@ -2421,7 +2455,7 @@ with tab2:
                 "slippage_bps": slippage_bps,
                 "commission_bps": commission_bps,
                 "feed": btfeed,
-                "version": "v3.5",
+                "version": "v3.6",
             }
 
             stats = res.get(
@@ -2601,7 +2635,7 @@ with tab2:
                 )
 
             # =================================================
-            # FIXED v3.5 KEYERROR SECTION
+            # ROBUST GATE-FAILURE SUMMARY
             # =================================================
 
             if (
@@ -2827,7 +2861,7 @@ with tab2:
                         ).encode(
                             "utf-8"
                         ),
-                        file_name="v3_5_swing_backtest_trades.csv",
+                        file_name="v3_6_swing_backtest_trades.csv",
                         mime="text/csv",
                         width="stretch",
                     )
@@ -2870,7 +2904,7 @@ with tab2:
                             ).encode(
                                 "utf-8"
                             ),
-                            file_name="v3_5_signal_audit.csv",
+                            file_name="v3_6_signal_audit.csv",
                             mime="text/csv",
                             width="stretch",
                         )
@@ -2925,15 +2959,212 @@ with tab3:
 
 
 # ============================================================
+# v3.6 EMPIRICAL THRESHOLD DISCOVERY TAB
+# ============================================================
+
+with tab4:
+
+    st.subheader(
+        "v3.6 Empirical Threshold Discovery"
+    )
+
+    st.caption(
+        "Research only. Live production BUY thresholds are not changed "
+        "from this screen."
+    )
+
+    st.info(
+        "v3.6 studies the historical candidate observations produced by "
+        "the production backtest and the underlying daily history. "
+        "Its purpose is to identify which threshold combinations are "
+        "actually reachable before any profitability claim is made."
+    )
+
+    result = (
+        st.session_state.latest_backtest_result
+    )
+
+    daily_bars = (
+        st.session_state.latest_backtest_daily_bars
+    )
+
+    market_daily_bars = (
+        st.session_state.latest_backtest_market_daily
+    )
+
+    settings = (
+        st.session_state.latest_backtest_settings
+    )
+
+    if not V36_RESEARCH_AVAILABLE:
+
+        st.warning(
+            "The main scanner is running normally, but the optional "
+            "v3.6 Threshold Discovery module is not available yet."
+        )
+
+        st.write(
+            "The required GitHub file is:"
+        )
+
+        st.code(
+            "threshold_discovery_ui.py"
+        )
+
+        if V36_IMPORT_ERROR:
+
+            with st.expander(
+                "Show v3.6 module import error"
+            ):
+
+                st.code(
+                    V36_IMPORT_ERROR
+                )
+
+        st.info(
+            "This safety check prevents a missing v3.6 research file "
+            "from crashing the Live Scanner, Backtester, or Calibration tabs."
+        )
+
+    elif result is None:
+
+        st.warning(
+            "Run the $2,000 backtest first. The completed historical "
+            "signal audit will automatically be stored for v3.6."
+        )
+
+    elif (
+        daily_bars is None
+        or not isinstance(
+            daily_bars,
+            pd.DataFrame,
+        )
+        or daily_bars.empty
+    ):
+
+        st.warning(
+            "Your saved backtest was created before v3.6 daily-history "
+            "storage was enabled."
+        )
+
+        st.info(
+            "Go back to the '$2,000 Swing Backtester' tab and run the "
+            "backtest one more time. Then return here."
+        )
+
+    else:
+
+        signal_log = result.get(
+            "signal_log",
+            pd.DataFrame(),
+        )
+
+        if (
+            not isinstance(
+                signal_log,
+                pd.DataFrame,
+            )
+            or signal_log.empty
+        ):
+
+            st.warning(
+                "The completed backtest does not contain a usable "
+                "historical signal audit."
+            )
+
+        else:
+
+            st.success(
+                f"v3.6 research dataset ready: "
+                f"{len(signal_log):,} historical candidate observations."
+            )
+
+            c1, c2, c3 = st.columns(
+                3
+            )
+
+            c1.metric(
+                "Candidate observations",
+                f"{len(signal_log):,}",
+            )
+
+            c2.metric(
+                "Daily stock bars",
+                f"{len(daily_bars):,}",
+            )
+
+            c3.metric(
+                "Market daily bars",
+                (
+                    f"{len(market_daily_bars):,}"
+                    if isinstance(
+                        market_daily_bars,
+                        pd.DataFrame,
+                    )
+                    else "0"
+                ),
+            )
+
+            if settings:
+
+                with st.expander(
+                    "Historical sample used for v3.6 research"
+                ):
+
+                    st.json(
+                        settings
+                    )
+
+            try:
+
+                render_threshold_discovery_lab(
+                    result,
+                    daily_bars,
+                )
+
+            except TypeError:
+
+                # Compatibility fallback in case the v3.6 UI was written
+                # to accept only the backtest result.
+                try:
+
+                    render_threshold_discovery_lab(
+                        result
+                    )
+
+                except Exception as exc:
+
+                    st.error(
+                        "The v3.6 research module loaded, but its UI "
+                        "function does not match the expected interface."
+                    )
+
+                    st.exception(
+                        exc
+                    )
+
+            except Exception as exc:
+
+                st.error(
+                    "v3.6 Threshold Discovery encountered an error. "
+                    "The production scanner and backtester remain unchanged."
+                )
+
+                st.exception(
+                    exc
+                )
+
+
+# ============================================================
 # DISCLAIMER
 # ============================================================
 
 st.divider()
 
 st.warning(
-    "Research only. Scanner signals, backtests, validation results and "
-    "calibration results do not guarantee future returns. Do not change "
-    "production BUY thresholds solely because one historical sample looks "
-    "better. Require repeated evidence across non-overlapping periods and "
-    "paper trading before risking real capital."
+    "Research only. Scanner signals, backtests, validation results, "
+    "calibration results and empirical threshold research do not guarantee "
+    "future returns. Do not change production BUY thresholds solely because "
+    "one historical sample looks better. Require repeated evidence across "
+    "non-overlapping periods and paper trading before risking real capital."
 )
