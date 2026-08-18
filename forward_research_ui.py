@@ -1,0 +1,1184 @@
+"""
+Institutional Swing Scanner v3.7
+Forward Research UI
+
+RESEARCH ONLY.
+
+This screen analyzes the historical signal audit and the forward-return
+research created by forward_research.py.
+
+It does not modify live production BUY thresholds.
+"""
+
+from __future__ import annotations
+
+import pandas as pd
+import streamlit as st
+
+from forward_research import (
+    attach_forward_returns,
+    run_forward_gate_research,
+)
+
+
+# ============================================================
+# BASIC HELPERS
+# ============================================================
+
+def _safe_df(value):
+    if isinstance(value, pd.DataFrame):
+        return value
+
+    return pd.DataFrame()
+
+
+def _number(
+    value,
+    digits=2,
+):
+    try:
+        if value is None or pd.isna(value):
+            return "—"
+
+        number = float(value)
+
+        if digits == 0:
+            return f"{number:,.0f}"
+
+        return f"{number:,.{digits}f}"
+
+    except Exception:
+        return "—"
+
+
+def _pct(
+    value,
+    digits=2,
+):
+    try:
+        if value is None or pd.isna(value):
+            return "—"
+
+        return f"{float(value):,.{digits}f}%"
+
+    except Exception:
+        return "—"
+
+
+def _display_table(
+    frame,
+    columns=None,
+    head=None,
+):
+    df = _safe_df(frame)
+
+    if df.empty:
+        st.info(
+            "No data is available for this section."
+        )
+        return
+
+    if columns:
+
+        available = [
+            column
+            for column in columns
+            if column in df.columns
+        ]
+
+        if available:
+            df = df[
+                available
+            ]
+
+    if head:
+        df = df.head(
+            int(head)
+        )
+
+    st.dataframe(
+        df,
+        width="stretch",
+        hide_index=True,
+    )
+
+
+# ============================================================
+# TOP SUMMARY
+# ============================================================
+
+def _render_summary(
+    result,
+):
+
+    summary = result.get(
+        "summary",
+        {},
+    )
+
+    observations = int(
+        summary.get(
+            "observations",
+            0,
+        )
+        or 0
+    )
+
+    forward_observations = int(
+        summary.get(
+            "forward_observations",
+            0,
+        )
+        or 0
+    )
+
+    single_gate_near_misses = int(
+        summary.get(
+            "single_gate_near_misses",
+            0,
+        )
+        or 0
+    )
+
+    largest_recovered = int(
+        summary.get(
+            "largest_recovered_if_removed",
+            0,
+        )
+        or 0
+    )
+
+    c1, c2, c3, c4 = st.columns(
+        4
+    )
+
+    c1.metric(
+        "Historical observations",
+        f"{observations:,}",
+    )
+
+    c2.metric(
+        "Forward-return observations",
+        f"{forward_observations:,}",
+    )
+
+    c3.metric(
+        "Single-gate near misses",
+        f"{single_gate_near_misses:,}",
+    )
+
+    c4.metric(
+        "Recovered if largest gate removed",
+        f"{largest_recovered:,}",
+    )
+
+    largest_label = summary.get(
+        "largest_bottleneck_label"
+    )
+
+    if largest_label:
+
+        st.info(
+            "Largest leave-one-gate-out bottleneck: "
+            f"**{largest_label}**"
+        )
+
+    best_gate = summary.get(
+        "best_10d_gate_label"
+    )
+
+    best_edge = summary.get(
+        "best_10d_edge_pct"
+    )
+
+    weakest_gate = summary.get(
+        "weakest_10d_gate_label"
+    )
+
+    weakest_edge = summary.get(
+        "weakest_10d_edge_pct"
+    )
+
+    if (
+        best_gate
+        and best_edge is not None
+    ):
+
+        st.success(
+            "Strongest descriptive 10-session gate association: "
+            f"**{best_gate}** with a mean pass-vs-fail edge of "
+            f"**{_pct(best_edge)}**."
+        )
+
+    if (
+        weakest_gate
+        and weakest_edge is not None
+    ):
+
+        st.warning(
+            "Weakest descriptive 10-session gate association: "
+            f"**{weakest_gate}** with a mean pass-vs-fail edge of "
+            f"**{_pct(weakest_edge)}**."
+        )
+
+
+# ============================================================
+# BOTTLENECK SECTION
+# ============================================================
+
+def _render_bottlenecks(
+    result,
+):
+
+    st.subheader(
+        "1. Production Gate Bottlenecks"
+    )
+
+    st.caption(
+        "The leave-one-gate-out test asks how many historical observations "
+        "would have passed every other reconstructed production gate if only "
+        "this one gate were removed."
+    )
+
+    bottlenecks = _safe_df(
+        result.get(
+            "bottlenecks"
+        )
+    )
+
+    if bottlenecks.empty:
+
+        st.info(
+            "No gate bottleneck results were produced."
+        )
+
+        return
+
+    display = bottlenecks.copy()
+
+    for column in [
+        "pass_rate_pct",
+        "failure_rate_pct",
+    ]:
+
+        if column in display.columns:
+
+            display[
+                column
+            ] = pd.to_numeric(
+                display[
+                    column
+                ],
+                errors="coerce",
+            ).round(
+                2
+            )
+
+    _display_table(
+        display,
+        columns=[
+            "gate_label",
+            "passed",
+            "failed",
+            "pass_rate_pct",
+            "failure_rate_pct",
+            "recovered_if_removed",
+        ],
+    )
+
+    top = bottlenecks.iloc[
+        0
+    ]
+
+    st.info(
+        "Most restrictive leave-one-gate-out result: "
+        f"**{top.get('gate_label', top.get('gate', 'Unknown'))}**. "
+        f"If only this gate were removed, "
+        f"**{int(top.get('recovered_if_removed', 0) or 0):,}** "
+        "historical observations would pass every other reconstructed gate."
+    )
+
+
+# ============================================================
+# FORWARD RETURN SECTION
+# ============================================================
+
+def _render_gate_forward_returns(
+    result,
+):
+
+    st.subheader(
+        "2. Did Each Gate Historically Add Value?"
+    )
+
+    st.caption(
+        "This compares forward returns for observations that passed each gate "
+        "versus observations that failed it. Positive edge means the pass group "
+        "had the better historical average. This is descriptive association, "
+        "not proof that the gate caused the result."
+    )
+
+    frame = _safe_df(
+        result.get(
+            "gate_forward_returns"
+        )
+    )
+
+    if frame.empty:
+
+        st.info(
+            "No forward-return gate analysis is available."
+        )
+
+        return
+
+    preferred_columns = [
+        "gate_label",
+        "passed_n",
+        "failed_n",
+        "1d_mean_edge_pct",
+        "3d_mean_edge_pct",
+        "5d_mean_edge_pct",
+        "10d_mean_edge_pct",
+        "20d_mean_edge_pct",
+        "5d_win_rate_edge_pct",
+        "10d_win_rate_edge_pct",
+        "20d_pass_mfe_pct",
+        "20d_fail_mfe_pct",
+        "20d_pass_mae_pct",
+        "20d_fail_mae_pct",
+    ]
+
+    _display_table(
+        frame,
+        columns=preferred_columns,
+    )
+
+    if (
+        "10d_mean_edge_pct"
+        in frame.columns
+    ):
+
+        valid = frame.dropna(
+            subset=[
+                "10d_mean_edge_pct"
+            ]
+        )
+
+        if not valid.empty:
+
+            best = (
+                valid
+                .sort_values(
+                    "10d_mean_edge_pct",
+                    ascending=False,
+                )
+                .iloc[
+                    0
+                ]
+            )
+
+            weakest = (
+                valid
+                .sort_values(
+                    "10d_mean_edge_pct",
+                    ascending=True,
+                )
+                .iloc[
+                    0
+                ]
+            )
+
+            st.markdown(
+                "#### 10-session descriptive leaders"
+            )
+
+            c1, c2 = st.columns(
+                2
+            )
+
+            with c1:
+
+                st.success(
+                    f"Strongest positive association: "
+                    f"**{best.get('gate_label', 'Unknown')}**"
+                )
+
+                st.write(
+                    "Pass-vs-fail mean return edge: "
+                    f"**{_pct(best.get('10d_mean_edge_pct'))}**"
+                )
+
+                st.write(
+                    "Pass-vs-fail win-rate edge: "
+                    f"**{_pct(best.get('10d_win_rate_edge_pct'))}**"
+                )
+
+            with c2:
+
+                st.warning(
+                    f"Weakest association: "
+                    f"**{weakest.get('gate_label', 'Unknown')}**"
+                )
+
+                st.write(
+                    "Pass-vs-fail mean return edge: "
+                    f"**{_pct(weakest.get('10d_mean_edge_pct'))}**"
+                )
+
+                st.write(
+                    "Pass-vs-fail win-rate edge: "
+                    f"**{_pct(weakest.get('10d_win_rate_edge_pct'))}**"
+                )
+
+
+# ============================================================
+# SCORE BUCKETS
+# ============================================================
+
+def _render_score_buckets(
+    result,
+):
+
+    st.subheader(
+        "3. Do Higher Scores Actually Perform Better?"
+    )
+
+    st.caption(
+        "A useful scoring model should ideally show improving future outcomes "
+        "as scores rise. If the relationship is flat or reversed, changing "
+        "thresholds alone may not fix the strategy."
+    )
+
+    swing = _safe_df(
+        result.get(
+            "swing_score_buckets"
+        )
+    )
+
+    intraday = _safe_df(
+        result.get(
+            "intraday_score_buckets"
+        )
+    )
+
+    st.markdown(
+        "#### Swing Score buckets"
+    )
+
+    if swing.empty:
+
+        st.info(
+            "No Swing Score bucket results are available."
+        )
+
+    else:
+
+        _display_table(
+            swing,
+        )
+
+    st.markdown(
+        "#### Intraday Score buckets"
+    )
+
+    if intraday.empty:
+
+        st.info(
+            "No Intraday Score bucket results are available."
+        )
+
+    else:
+
+        _display_table(
+            intraday,
+        )
+
+
+# ============================================================
+# THRESHOLD SWEEP
+# ============================================================
+
+def _render_threshold_sweep(
+    result,
+):
+
+    st.subheader(
+        "4. Swing Score + Intraday Score Research Grid"
+    )
+
+    st.caption(
+        "This isolates the two main scores without forcing every other gate. "
+        "It helps determine whether 85/85 is historically meaningful or merely "
+        "too restrictive."
+    )
+
+    sweep = _safe_df(
+        result.get(
+            "threshold_sweep"
+        )
+    )
+
+    if sweep.empty:
+
+        st.info(
+            "No threshold-sweep results are available."
+        )
+
+        return
+
+    minimum_sample = st.slider(
+        "Minimum observations for threshold ranking",
+        min_value=5,
+        max_value=100,
+        value=20,
+        step=5,
+        key="v37_min_threshold_sample",
+        help=(
+            "Very small samples can look excellent by chance. "
+            "Use at least 20 observations for the first review."
+        ),
+    )
+
+    horizon = st.selectbox(
+        "Threshold comparison horizon",
+        [
+            1,
+            3,
+            5,
+            10,
+            20,
+        ],
+        index=3,
+        key="v37_threshold_horizon",
+    )
+
+    mean_column = (
+        f"{horizon}d_mean_pct"
+    )
+
+    win_column = (
+        f"{horizon}d_win_rate_pct"
+    )
+
+    sample_column = (
+        f"{horizon}d_n"
+    )
+
+    filtered = sweep.copy()
+
+    if sample_column in filtered.columns:
+
+        filtered = filtered[
+            pd.to_numeric(
+                filtered[
+                    sample_column
+                ],
+                errors="coerce",
+            ).fillna(
+                0
+            )
+            >= minimum_sample
+        ].copy()
+
+    if filtered.empty:
+
+        st.warning(
+            "No score combinations meet the selected minimum sample size."
+        )
+
+    else:
+
+        if mean_column in filtered.columns:
+
+            filtered[
+                "_rank_mean"
+            ] = pd.to_numeric(
+                filtered[
+                    mean_column
+                ],
+                errors="coerce",
+            )
+
+            filtered = (
+                filtered
+                .sort_values(
+                    [
+                        "_rank_mean",
+                        sample_column
+                        if sample_column
+                        in filtered.columns
+                        else "observations",
+                    ],
+                    ascending=[
+                        False,
+                        False,
+                    ],
+                    na_position="last",
+                )
+                .drop(
+                    columns=[
+                        "_rank_mean"
+                    ],
+                    errors="ignore",
+                )
+            )
+
+        st.markdown(
+            f"#### Highest historical {horizon}-session mean returns"
+        )
+
+        display_columns = [
+            "swing_threshold",
+            "intraday_threshold",
+            "observations",
+            "observation_rate_pct",
+            sample_column,
+            mean_column,
+            f"{horizon}d_median_pct",
+            win_column,
+            "20d_mfe_pct",
+            "20d_mae_pct",
+        ]
+
+        _display_table(
+            filtered,
+            columns=display_columns,
+            head=30,
+        )
+
+        best = filtered.iloc[
+            0
+        ]
+
+        st.info(
+            "Highest-ranked combination under the selected descriptive screen: "
+            f"Swing Score ≥ **{_number(best.get('swing_threshold'), 1)}**, "
+            f"Intraday Score ≥ **{_number(best.get('intraday_threshold'), 1)}**. "
+            f"Historical sample: **{int(best.get(sample_column, best.get('observations', 0)) or 0):,}**. "
+            f"Mean {horizon}-session return: **{_pct(best.get(mean_column))}**. "
+            f"Positive-return rate: **{_pct(best.get(win_column))}**."
+        )
+
+        st.warning(
+            "This is not an optimizer result and is not permission to change "
+            "production thresholds. It is a descriptive research lead that must "
+            "survive portfolio replay and out-of-sample testing."
+        )
+
+    with st.expander(
+        "Show entire threshold sweep"
+    ):
+
+        _display_table(
+            sweep,
+        )
+
+
+# ============================================================
+# SINGLE-GATE NEAR MISSES
+# ============================================================
+
+def _render_single_gate_near_misses(
+    result,
+):
+
+    st.subheader(
+        "5. Observations That Failed Exactly One Gate"
+    )
+
+    st.caption(
+        "These are particularly useful research cases because they passed every "
+        "other reconstructed production gate."
+    )
+
+    misses = _safe_df(
+        result.get(
+            "single_gate_near_misses"
+        )
+    )
+
+    if misses.empty:
+
+        st.info(
+            "No historical observation failed exactly one reconstructed gate."
+        )
+
+        return
+
+    if (
+        "single_failed_gate_label"
+        in misses.columns
+    ):
+
+        counts = (
+            misses[
+                "single_failed_gate_label"
+            ]
+            .fillna(
+                "Unknown"
+            )
+            .value_counts()
+            .rename_axis(
+                "failed_gate"
+            )
+            .reset_index(
+                name="observations"
+            )
+        )
+
+        st.markdown(
+            "#### Single-gate miss counts"
+        )
+
+        st.dataframe(
+            counts,
+            width="stretch",
+            hide_index=True,
+        )
+
+    display_columns = [
+        "symbol",
+        "session",
+        "signal_time",
+        "single_failed_gate_label",
+        "swing_score",
+        "intraday_score",
+        "entry_quality",
+        "reward_risk",
+        "market_score",
+        "leadership_percentile",
+        "distribution_days",
+        "setup",
+        "forward_1d_pct",
+        "forward_3d_pct",
+        "forward_5d_pct",
+        "forward_10d_pct",
+        "forward_20d_pct",
+        "forward_20d_mfe_pct",
+        "forward_20d_mae_pct",
+    ]
+
+    _display_table(
+        misses,
+        columns=display_columns,
+        head=150,
+    )
+
+
+# ============================================================
+# ALL-GATE SURVIVORS
+# ============================================================
+
+def _render_production_survivors(
+    result,
+):
+
+    st.subheader(
+        "6. Historical All-Gate Survivors"
+    )
+
+    survivors = _safe_df(
+        result.get(
+            "production_survivors"
+        )
+    )
+
+    if survivors.empty:
+
+        st.warning(
+            "No historical observation passed every reconstructed production gate."
+        )
+
+        st.caption(
+            "That does not automatically mean the strategy is wrong. "
+            "The bottleneck and forward-return studies above should determine "
+            "whether a gate is valuable, overly restrictive, or possibly being "
+            "reconstructed differently from the original live decision chain."
+        )
+
+        return
+
+    st.success(
+        f"{len(survivors):,} historical observations passed every reconstructed "
+        "production gate."
+    )
+
+    display_columns = [
+        "symbol",
+        "session",
+        "signal_time",
+        "signal",
+        "daily_signal",
+        "intraday_signal",
+        "swing_score",
+        "intraday_score",
+        "entry_quality",
+        "reward_risk",
+        "market_score",
+        "leadership_percentile",
+        "distribution_days",
+        "setup",
+        "forward_1d_pct",
+        "forward_3d_pct",
+        "forward_5d_pct",
+        "forward_10d_pct",
+        "forward_20d_pct",
+        "forward_20d_mfe_pct",
+        "forward_20d_mae_pct",
+    ]
+
+    _display_table(
+        survivors,
+        columns=display_columns,
+        head=150,
+    )
+
+
+# ============================================================
+# DOWNLOADS
+# ============================================================
+
+def _render_downloads(
+    result,
+    enriched_signal_log,
+):
+
+    st.subheader(
+        "7. Research Downloads"
+    )
+
+    bottlenecks = _safe_df(
+        result.get(
+            "bottlenecks"
+        )
+    )
+
+    gate_returns = _safe_df(
+        result.get(
+            "gate_forward_returns"
+        )
+    )
+
+    threshold_sweep = _safe_df(
+        result.get(
+            "threshold_sweep"
+        )
+    )
+
+    misses = _safe_df(
+        result.get(
+            "single_gate_near_misses"
+        )
+    )
+
+    if not bottlenecks.empty:
+
+        st.download_button(
+            "Download gate bottlenecks",
+            data=bottlenecks.to_csv(
+                index=False
+            ).encode(
+                "utf-8"
+            ),
+            file_name="v3_7_gate_bottlenecks.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+    if not gate_returns.empty:
+
+        st.download_button(
+            "Download gate forward-return study",
+            data=gate_returns.to_csv(
+                index=False
+            ).encode(
+                "utf-8"
+            ),
+            file_name="v3_7_gate_forward_returns.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+    if not threshold_sweep.empty:
+
+        st.download_button(
+            "Download score threshold sweep",
+            data=threshold_sweep.to_csv(
+                index=False
+            ).encode(
+                "utf-8"
+            ),
+            file_name="v3_7_threshold_sweep.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+    if not misses.empty:
+
+        st.download_button(
+            "Download single-gate near misses",
+            data=misses.to_csv(
+                index=False
+            ).encode(
+                "utf-8"
+            ),
+            file_name="v3_7_single_gate_near_misses.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+    if (
+        isinstance(
+            enriched_signal_log,
+            pd.DataFrame,
+        )
+        and not enriched_signal_log.empty
+    ):
+
+        st.download_button(
+            "Download full forward-return audit",
+            data=enriched_signal_log.to_csv(
+                index=False
+            ).encode(
+                "utf-8"
+            ),
+            file_name="v3_7_forward_return_audit.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+
+# ============================================================
+# MAIN UI
+# ============================================================
+
+def render_forward_research_lab(
+    backtest_result: dict,
+    daily_bars: pd.DataFrame,
+):
+
+    st.header(
+        "v3.7 Gate Bottleneck + Forward Return Analyzer"
+    )
+
+    st.caption(
+        "Research only. The live production scanner remains unchanged."
+    )
+
+    st.info(
+        "v3.7 studies what happened after each historical scanner observation "
+        "and measures whether the rules that block trades were actually "
+        "associated with better future outcomes."
+    )
+
+    if not isinstance(
+        backtest_result,
+        dict,
+    ):
+
+        st.warning(
+            "Run the production backtest first."
+        )
+
+        return
+
+    signal_log = _safe_df(
+        backtest_result.get(
+            "signal_log"
+        )
+    )
+
+    if signal_log.empty:
+
+        st.warning(
+            "The production backtest does not contain a usable historical "
+            "signal audit."
+        )
+
+        return
+
+    if (
+        daily_bars is None
+        or not isinstance(
+            daily_bars,
+            pd.DataFrame,
+        )
+        or daily_bars.empty
+    ):
+
+        st.warning(
+            "Historical daily bars are required to calculate forward returns."
+        )
+
+        st.info(
+            "Run the $2,000 backtest again after the app.py v3.7 update stores "
+            "daily_history in Streamlit session state."
+        )
+
+        return
+
+    # ========================================================
+    # DATASET SUMMARY
+    # ========================================================
+
+    st.subheader(
+        "Historical Research Dataset"
+    )
+
+    c1, c2, c3 = st.columns(
+        3
+    )
+
+    c1.metric(
+        "Signal observations",
+        f"{len(signal_log):,}",
+    )
+
+    c2.metric(
+        "Historical daily bars",
+        f"{len(daily_bars):,}",
+    )
+
+    symbol_count = (
+        signal_log[
+            "symbol"
+        ]
+        .nunique()
+        if "symbol"
+        in signal_log.columns
+        else 0
+    )
+
+    c3.metric(
+        "Symbols represented",
+        f"{symbol_count:,}",
+    )
+
+    st.warning(
+        "The forward-return study evaluates the symbols and historical periods "
+        "contained in this backtest. It is not yet a complete historical "
+        "reconstruction of the entire U.S. equity universe."
+    )
+
+    # ========================================================
+    # RUN CONTROL
+    # ========================================================
+
+    run = st.button(
+        "RUN v3.7 FORWARD-RETURN RESEARCH",
+        type="primary",
+        width="stretch",
+        key="run_v37_forward_research",
+    )
+
+    if run:
+
+        status = st.status(
+            "Building historical forward-return research dataset...",
+            expanded=True,
+        )
+
+        progress = st.progress(
+            0
+        )
+
+        try:
+
+            status.write(
+                "1/3 Matching historical scanner observations to future daily prices..."
+            )
+
+            progress.progress(
+                15
+            )
+
+            enriched = attach_forward_returns(
+                signal_log,
+                daily_bars,
+            )
+
+            if (
+                enriched is None
+                or not isinstance(
+                    enriched,
+                    pd.DataFrame,
+                )
+                or enriched.empty
+            ):
+
+                status.update(
+                    label="No forward-return observations could be constructed.",
+                    state="error",
+                )
+
+                st.error(
+                    "No usable forward-return dataset was created. "
+                    "Check that signal_log and daily_history contain matching "
+                    "symbols and dates."
+                )
+
+                return
+
+            progress.progress(
+                55
+            )
+
+            status.write(
+                "2/3 Reconstructing production gate matrix and bottlenecks..."
+            )
+
+            result = run_forward_gate_research(
+                enriched
+            )
+
+            progress.progress(
+                90
+            )
+
+            status.write(
+                "3/3 Building score buckets, threshold sweep and near-miss research..."
+            )
+
+            st.session_state[
+                "v37_forward_research_result"
+            ] = result
+
+            st.session_state[
+                "v37_enriched_signal_log"
+            ] = enriched
+
+            progress.progress(
+                100
+            )
+
+            status.update(
+                label="v3.7 forward-return research complete.",
+                state="complete",
+                expanded=False,
+            )
+
+        except Exception as exc:
+
+            status.update(
+                label="v3.7 research stopped because of an error.",
+                state="error",
+                expanded=True,
+            )
+
+            st.exception(
+                exc
+            )
+
+            return
+
+    # ========================================================
+    # SAVED RESULTS
+    # ========================================================
+
+    result = st.session_state.get(
+        "v37_forward_research_result"
+    )
+
+    enriched_signal_log = st.session_state.get(
+        "
