@@ -109,18 +109,18 @@ def safe_int(value, default=0):
 
 def signal_icon(signal):
     if signal in {"A+ SWING BUY", "BUY"}:
-        return "ð¢"
+        return "🟢"
     if signal == "WATCH":
-        return "ð¡"
+        return "🟡"
     if signal == "TOO EXTENDED":
-        return "ð´"
-    return "âª"
+        return "🔴"
+    return "⚪"
 
 
 def action_text(signal):
     return {
-        "A+ SWING BUY": "BUY â top-tier setup confirmed",
-        "BUY": "BUY â entry rules confirmed",
+        "A+ SWING BUY": "BUY — top-tier setup confirmed",
+        "BUY": "BUY — entry rules confirmed",
         "WATCH": "WAIT FOR BUY TRIGGER",
         "TOO EXTENDED": "WAIT FOR PULLBACK / RETEST",
         "AVOID": "PASS",
@@ -192,7 +192,7 @@ def render_trade_card(row, rank_num=None):
     prefix = f"#{rank_num} " if rank_num is not None else ""
 
     with st.container(border=True):
-        st.markdown(f"### {prefix}{signal_icon(signal)} {symbol} â {signal}")
+        st.markdown(f"### {prefix}{signal_icon(signal)} {symbol} — {signal}")
         st.write(f"**Swing Score:** {score_display(row.get('swing_score'))}/100")
         st.write(f"**Setup:** {row.get('setup', '')}")
         st.write(f"**Current Price:** {money(row.get('price'))}")
@@ -207,7 +207,7 @@ def render_trade_card(row, rank_num=None):
             st.caption(f"Risk gate: PASS | Market leadership: {leadership_text} | Distribution days: {distribution}")
 
         st.markdown("#### Entry Plan")
-        st.write(f"**Preferred Entry Zone:** {money(row.get('entry_low'))} â {money(row.get('entry_high'))}")
+        st.write(f"**Preferred Entry Zone:** {money(row.get('entry_low'))} – {money(row.get('entry_high'))}")
         st.write(f"**Stop:** {money(row.get('stop'))}")
         st.write(f"**Target 1:** {money(row.get('target1'))}")
         st.write(f"**Target 2:** {money(row.get('target2'))}")
@@ -265,7 +265,7 @@ def render_validation_summary(validation):
     if notes:
         with st.expander("Validation notes"):
             for note in notes:
-                st.write(f"â¢ {note}")
+                st.write(f"• {note}")
 
 
 with st.sidebar:
@@ -539,10 +539,10 @@ with tab1:
                 st.divider()
                 st.subheader("Current Market Decision")
                 if not buys.empty:
-                    st.success(f"ð¢ {len(buys)} CONFIRMED SWING BUY {'SIGNAL' if len(buys) == 1 else 'SIGNALS'}")
+                    st.success(f"🟢 {len(buys)} CONFIRMED SWING BUY {'SIGNAL' if len(buys) == 1 else 'SIGNALS'}")
                     st.write(", ".join(buys["symbol"].head(8)))
                 else:
-                    st.error("ð´ NO CONFIRMED SWING BUY RIGHT NOW")
+                    st.error("🔴 NO CONFIRMED SWING BUY RIGHT NOW")
                     st.caption("Do not buy simply because a stock has a high Swing Score. Wait for BUY or A+ SWING BUY.")
 
                 m1, m2, m3, m4 = st.columns(4)
@@ -558,7 +558,7 @@ with tab1:
                     render_trade_card(row, rank_num)
 
                 st.divider()
-                st.header("ð¢ Confirmed BUY Signals")
+                st.header("🟢 Confirmed BUY Signals")
                 if buys.empty:
                     st.info("No confirmed BUY signals right now.")
                 else:
@@ -566,7 +566,7 @@ with tab1:
                         render_trade_card(row)
 
                 st.divider()
-                st.header("ð´ Strong But Too Extended")
+                st.header("🔴 Strong But Too Extended")
                 if extended.empty:
                     st.write("None.")
                 else:
@@ -574,7 +574,7 @@ with tab1:
                         render_trade_card(row)
 
                 st.divider()
-                st.header("ð¡ WATCH List")
+                st.header("🟡 WATCH List")
                 if watches.empty:
                     st.write("None.")
                 else:
@@ -640,7 +640,7 @@ with tab2:
             st.error("Choose a start date before the end date.")
             st.stop()
         if (end_date - start_date).days > 365:
-            st.warning("A range longer than one year can be slow. Start with 6â12 months and then test additional periods.")
+            st.warning("A range longer than one year can be slow. Start with 6–12 months and then test additional periods.")
         if len(syms) < 5:
             st.error("Enter at least 5 symbols.")
             st.stop()
@@ -717,16 +717,16 @@ with tab2:
             st.success("Production backtest completed and v3.7 research data saved.")
 
             cols = st.columns(4)
-            cols[0].metric("Ending $", stats.get("ending_capital", "â"))
-            cols[1].metric("Return %", stats.get("total_return_pct", "â"))
-            cols[2].metric("Win rate %", stats.get("win_rate_pct", "â"))
-            cols[3].metric("Profit factor", stats.get("profit_factor", "â"))
+            cols[0].metric("Ending $", stats.get("ending_capital", "—"))
+            cols[1].metric("Return %", stats.get("total_return_pct", "—"))
+            cols[2].metric("Win rate %", stats.get("win_rate_pct", "—"))
+            cols[3].metric("Profit factor", stats.get("profit_factor", "—"))
 
             cols2 = st.columns(4)
-            cols2[0].metric("Max DD %", stats.get("max_drawdown_pct", "â"))
-            cols2[1].metric("Trades", stats.get("trades", "â"))
+            cols2[0].metric("Max DD %", stats.get("max_drawdown_pct", "—"))
+            cols2[1].metric("Trades", stats.get("trades", "—"))
             cols2[2].metric("Average expectancy", f"{safe_float(stats.get('expectancy_r')):.3f} R")
-            cols2[3].metric("Average trade $", stats.get("avg_trade_dollars", "â"))
+            cols2[3].metric("Average trade $", stats.get("avg_trade_dollars", "—"))
 
             for warning in res.get("warnings", []):
                 st.warning(warning)
@@ -772,7 +772,7 @@ with tab2:
                     with st.container(border=True):
                         symbol = near_miss.get("symbol", "N/A")
                         signal = near_miss.get("signal", "N/A")
-                        st.markdown(f"**{symbol} â {signal}**")
+                        st.markdown(f"**{symbol} — {signal}**")
                         st.write(f"Session: {near_miss.get('session', 'N/A')} | Gates passed: {near_miss.get('gates_passed', 'N/A')}")
                         st.write(
                             f"Swing Score: {safe_float(near_miss.get('swing_score')):.1f} | "
@@ -908,3 +908,4 @@ st.warning(
     "Do not change production BUY thresholds solely because one historical sample looks better. "
     "Require repeated evidence across non-overlapping periods, portfolio simulation and paper trading "
     "before risking real capital."
+)
