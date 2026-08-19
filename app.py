@@ -1,6 +1,5 @@
-import os
-import importlib
 import inspect
+import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -36,98 +35,48 @@ from strategy import (
 
 
 # ============================================================
-# VERSION
+# OPTIONAL v3.7 FORWARD RESEARCH
 # ============================================================
 
-APP_VERSION = "v3.8"
-
-
-# ============================================================
-# OPTIONAL v3.8 PRODUCTION-vs-CHALLENGER UI
-# ============================================================
-
-V38_VALIDATION_AVAILABLE = False
-V38_IMPORT_ERROR = None
-render_v38_validation_lab = None
-V38_MODULE_NAME = None
-
-
-def _load_v38_ui():
-    """
-    Tries several compatible module/function names so a naming difference
-    in the previously committed v3.8 files does not crash the whole app.
-    """
-
-    global V38_VALIDATION_AVAILABLE
-    global V38_IMPORT_ERROR
-    global render_v38_validation_lab
-    global V38_MODULE_NAME
-
-    module_candidates = [
-        "portfolio_validation_ui",
-        "production_vs_challenger_ui",
-        "challenger_validation_ui",
-        "production_challenger_ui",
-        "v38_portfolio_validation_ui",
-        "v38_validation_ui",
-        "portfolio_challenger_ui",
-    ]
-
-    function_candidates = [
-        "render_portfolio_validation_lab",
-        "render_production_vs_challenger_lab",
-        "render_challenger_validation_lab",
-        "render_production_challenger_lab",
-        "render_v38_portfolio_validation_lab",
-        "render_v38_validation_lab",
-    ]
-
-    errors = []
-
-    for module_name in module_candidates:
-
-        try:
-            module = importlib.import_module(
-                module_name
-            )
-
-        except Exception as exc:
-            errors.append(
-                f"{module_name}: {exc}"
-            )
-            continue
-
-        for function_name in function_candidates:
-
-            function = getattr(
-                module,
-                function_name,
-                None,
-            )
-
-            if callable(
-                function
-            ):
-
-                render_v38_validation_lab = function
-                V38_VALIDATION_AVAILABLE = True
-                V38_MODULE_NAME = module_name
-                V38_IMPORT_ERROR = None
-                return
-
-        errors.append(
-            f"{module_name}: module loaded but no recognized "
-            f"v3.8 render function was found."
-        )
-
-    V38_VALIDATION_AVAILABLE = False
-
-    V38_IMPORT_ERROR = "\n".join(
-        errors
+try:
+    from forward_research import (
+        attach_forward_returns,
+        run_forward_gate_research,
     )
 
+    from forward_research_ui import (
+        render_forward_research_lab,
+    )
 
-_load_v38_ui()
+    V37_AVAILABLE = True
+    V37_IMPORT_ERROR = None
+
+except Exception as exc:
+    attach_forward_returns = None
+    run_forward_gate_research = None
+    render_forward_research_lab = None
+
+    V37_AVAILABLE = False
+    V37_IMPORT_ERROR = str(exc)
+
+
+# ============================================================
+# OPTIONAL v3.8 PRODUCTION VS CHALLENGER
+# ============================================================
+
+try:
+    from production_vs_challenger_ui import (
+        render_production_vs_challenger_lab,
+    )
+
+    V38_AVAILABLE = True
+    V38_IMPORT_ERROR = None
+
+except Exception as exc:
+    render_production_vs_challenger_lab = None
+
+    V38_AVAILABLE = False
+    V38_IMPORT_ERROR = str(exc)
 
 
 # ============================================================
@@ -141,27 +90,27 @@ ET = ZoneInfo(
 )
 
 st.set_page_config(
-    page_title=f"Institutional Swing Scanner {APP_VERSION}",
+    page_title="Institutional Swing Scanner v3.8",
     layout="wide",
 )
 
 st.title(
-    f"Institutional Swing Scanner {APP_VERSION}"
+    "Institutional Swing Scanner v3.8"
 )
 
 st.caption(
     "Full U.S. market | catalyst-gap protection | daily + intraday "
     "confirmation | SMS alerts | production-equivalent backtesting | "
-    "adaptive calibration | Production-vs-Challenger portfolio validation | "
-    "no live orders"
+    "adaptive calibration | forward-return research | "
+    "Production-vs-Challenger portfolio validation | no live orders"
 )
 
-
-tab1, tab2, tab3, tab4 = st.tabs(
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "Live Swing Scanner",
         "$2,000 Swing Backtester",
         "Calibration & Validation",
+        "v3.7 Forward Research",
         "v3.8 Production vs Challenger",
     ]
 )
@@ -171,18 +120,16 @@ tab1, tab2, tab3, tab4 = st.tabs(
 # SESSION STORAGE
 # ============================================================
 
-SESSION_DEFAULTS = {
+DEFAULT_SESSION_VALUES = {
     "latest_backtest_result": None,
     "latest_backtest_settings": None,
     "latest_backtest_daily_bars": None,
     "latest_backtest_market_daily": None,
-    "latest_backtest_minute_bars": None,
-    "latest_backtest_spy_minutes": None,
-    "latest_backtest_qqq_minutes": None,
+    "v37_enriched_signal_log": None,
+    "v37_forward_research_result": None,
 }
 
-
-for key, value in SESSION_DEFAULTS.items():
+for key, value in DEFAULT_SESSION_VALUES.items():
 
     if key not in st.session_state:
         st.session_state[
@@ -191,12 +138,11 @@ for key, value in SESSION_DEFAULTS.items():
 
 
 # ============================================================
-# HELPERS
+# BASIC HELPERS
 # ============================================================
 
-def money(
-    value
-):
+def money(value):
+
     try:
 
         if value is None or pd.isna(
@@ -210,9 +156,8 @@ def money(
         return "N/A"
 
 
-def score_display(
-    value
-):
+def score_display(value):
+
     try:
 
         if value is None or pd.isna(
@@ -226,9 +171,8 @@ def score_display(
         return "N/A"
 
 
-def rr_display(
-    value
-):
+def rr_display(value):
+
     try:
 
         if value is None or pd.isna(
@@ -246,6 +190,7 @@ def safe_float(
     value,
     default=0.0,
 ):
+
     try:
 
         if value is None or pd.isna(
@@ -265,6 +210,7 @@ def safe_int(
     value,
     default=0,
 ):
+
     try:
 
         if value is None or pd.isna(
@@ -282,9 +228,7 @@ def safe_int(
         return default
 
 
-def signal_icon(
-    signal
-):
+def signal_icon(signal):
 
     if signal in {
         "A+ SWING BUY",
@@ -301,17 +245,27 @@ def signal_icon(
     return "⚪"
 
 
-def action_text(
-    signal
-):
+def action_text(signal):
 
     return {
-        "A+ SWING BUY": "BUY — top-tier setup confirmed",
-        "BUY": "BUY — entry rules confirmed",
-        "WATCH": "WAIT FOR BUY TRIGGER",
-        "TOO EXTENDED": "WAIT FOR PULLBACK / RETEST",
-        "AVOID": "PASS",
-        "NO BUY": "WAIT",
+        "A+ SWING BUY": (
+            "BUY — top-tier setup confirmed"
+        ),
+        "BUY": (
+            "BUY — entry rules confirmed"
+        ),
+        "WATCH": (
+            "WAIT FOR BUY TRIGGER"
+        ),
+        "TOO EXTENDED": (
+            "WAIT FOR PULLBACK / RETEST"
+        ),
+        "AVOID": (
+            "PASS"
+        ),
+        "NO BUY": (
+            "WAIT"
+        ),
     }.get(
         signal,
         "WAIT",
@@ -322,9 +276,7 @@ def action_text(
 # WHY NOT BUY
 # ============================================================
 
-def why_not_buy(
-    row
-):
+def why_not_buy(row):
 
     signal = row.get(
         "signal",
@@ -341,7 +293,10 @@ def why_not_buy(
         return str(
             row.get(
                 "risk_reason",
-                "A hard downside catalyst-risk gate is active.",
+                (
+                    "A hard downside catalyst-risk "
+                    "gate is active."
+                ),
             )
         )
 
@@ -357,8 +312,9 @@ def why_not_buy(
     if signal == "TOO EXTENDED":
 
         return (
-            "The stock is too extended from its preferred entry. "
-            "Wait for a pullback or retest."
+            "The stock is too extended from its "
+            "preferred entry. Wait for a pullback "
+            "or retest."
         )
 
     failures = []
@@ -423,38 +379,40 @@ def why_not_buy(
         )
 
     except Exception:
-
         inside_entry_zone = False
 
     if swing_score < 85:
 
         failures.append(
-            f"Swing Score {swing_score:.1f} is below the 85 BUY threshold"
+            f"Swing Score {swing_score:.1f} "
+            f"is below 85"
         )
 
     if entry_quality < 10:
 
         failures.append(
-            f"Entry Quality {entry_quality:.1f}/15 is below the "
-            f"10/15 BUY requirement"
+            f"Entry Quality {entry_quality:.1f}/15 "
+            f"is below 10/15"
         )
 
     if reward_risk < 2:
 
         failures.append(
-            f"Reward/Risk {reward_risk:.2f}:1 is below the required 2.00:1"
+            f"Reward/Risk {reward_risk:.2f}:1 "
+            f"is below 2.00:1"
         )
 
     if market_score < 5:
 
         failures.append(
-            f"Market Score {market_score:.1f}/10 is below the minimum 5/10"
+            f"Market Score {market_score:.1f}/10 "
+            f"is below 5/10"
         )
 
     if not inside_entry_zone:
 
         failures.append(
-            "Current price is outside the preferred entry zone"
+            "Price is outside the preferred entry zone"
         )
 
     if not bool(
@@ -465,7 +423,8 @@ def why_not_buy(
     ):
 
         failures.append(
-            "The 20-day and 50-day trend slopes are not both rising"
+            "20-day and 50-day trend slopes "
+            "are not both rising"
         )
 
     distribution_days = safe_int(
@@ -477,8 +436,8 @@ def why_not_buy(
     if distribution_days > 4:
 
         failures.append(
-            f"{distribution_days} recent distribution days show "
-            f"excessive selling pressure"
+            f"{distribution_days} distribution days "
+            f"exceed the production limit"
         )
 
     leadership = row.get(
@@ -497,8 +456,9 @@ def why_not_buy(
     ):
 
         failures.append(
-            f"Market leadership rank {float(leadership):.0f}% "
-            f"is below the 70% BUY gate"
+            f"Leadership percentile "
+            f"{float(leadership):.0f}% "
+            f"is below 70%"
         )
 
     intraday_signal = str(
@@ -511,34 +471,25 @@ def why_not_buy(
     if intraday_signal != "BUY":
 
         failures.append(
-            "Intraday signal has not changed to BUY"
+            "Intraday signal is not BUY"
         )
 
     if intraday_score < 85:
 
         failures.append(
-            f"Intraday Score {intraday_score:.1f} is below the "
-            f"85 confirmation threshold"
+            f"Intraday Score "
+            f"{intraday_score:.1f} "
+            f"is below 85"
         )
 
-    if signal == "AVOID" and not failures:
+    if failures:
 
-        failures.append(
-            "The setup does not meet enough high-probability swing requirements"
-        )
-
-    if signal == "WATCH" and not failures:
-
-        failures.append(
-            "At least one required production confirmation has not passed."
+        return " | ".join(
+            failures
         )
 
     return (
-        " | ".join(
-            failures
-        )
-        if failures
-        else "Waiting for additional confirmation."
+        "Waiting for additional confirmation."
     )
 
 
@@ -572,7 +523,9 @@ def render_trade_card(
     ):
 
         st.markdown(
-            f"### {prefix}{signal_icon(signal)} {symbol} — {signal}"
+            f"### {prefix}"
+            f"{signal_icon(signal)} "
+            f"{symbol} — {signal}"
         )
 
         st.write(
@@ -607,7 +560,10 @@ def render_trade_card(
                 + str(
                     row.get(
                         "risk_reason",
-                        "Hard downside catalyst-risk gate active",
+                        (
+                            "Hard downside catalyst-risk "
+                            "gate active"
+                        ),
                     )
                 )
             )
@@ -624,7 +580,10 @@ def render_trade_card(
                 or pd.isna(
                     leadership
                 )
-                else f"{float(leadership):.0f}th percentile"
+                else (
+                    f"{float(leadership):.0f}th "
+                    f"percentile"
+                )
             )
 
             distribution = safe_int(
@@ -635,7 +594,7 @@ def render_trade_card(
 
             st.caption(
                 f"Risk gate: PASS | "
-                f"Market leadership: {leadership_text} | "
+                f"Leadership: {leadership_text} | "
                 f"Distribution days: {distribution}"
             )
 
@@ -684,13 +643,9 @@ def render_trade_card(
                 )
             )
 
-            st.markdown(
-                "#### Why BUY?"
-            )
-
             st.success(
-                "Swing score, entry quality, reward/risk, entry zone, "
-                "market conditions and intraday confirmation passed."
+                "All required production BUY "
+                "confirmations passed."
             )
 
         elif signal == "WATCH":
@@ -699,10 +654,6 @@ def render_trade_card(
                 action_text(
                     signal
                 )
-            )
-
-            st.markdown(
-                "#### Why Not BUY Yet?"
             )
 
             st.info(
@@ -719,10 +670,6 @@ def render_trade_card(
                 )
             )
 
-            st.markdown(
-                "#### Why Not BUY Yet?"
-            )
-
             st.info(
                 why_not_buy(
                     row
@@ -735,10 +682,6 @@ def render_trade_card(
                 action_text(
                     signal
                 )
-            )
-
-            st.markdown(
-                "#### Why Not BUY Yet?"
             )
 
             st.info(
@@ -755,102 +698,290 @@ def render_trade_card(
 
 
 # ============================================================
-# v3.8 UI COMPATIBILITY CALLER
+# AUTOMATIC v3.7 DATASET BUILDER
 # ============================================================
 
-def call_v38_validation_ui(
+def build_v37_dataset_if_possible():
+
+    if not V37_AVAILABLE:
+        return None
+
+    existing = st.session_state.get(
+        "v37_enriched_signal_log"
+    )
+
+    if (
+        isinstance(
+            existing,
+            pd.DataFrame,
+        )
+        and not existing.empty
+    ):
+
+        return existing
+
+    result = st.session_state.get(
+        "latest_backtest_result"
+    )
+
+    daily_bars = st.session_state.get(
+        "latest_backtest_daily_bars"
+    )
+
+    if not isinstance(
+        result,
+        dict,
+    ):
+        return None
+
+    if (
+        not isinstance(
+            daily_bars,
+            pd.DataFrame,
+        )
+        or daily_bars.empty
+    ):
+        return None
+
+    signal_log = result.get(
+        "signal_log",
+        pd.DataFrame(),
+    )
+
+    if (
+        not isinstance(
+            signal_log,
+            pd.DataFrame,
+        )
+        or signal_log.empty
+    ):
+        return None
+
+    try:
+
+        enriched = attach_forward_returns(
+            signal_log,
+            daily_bars,
+        )
+
+        if (
+            isinstance(
+                enriched,
+                pd.DataFrame,
+            )
+            and not enriched.empty
+        ):
+
+            st.session_state[
+                "v37_enriched_signal_log"
+            ] = enriched
+
+            research = (
+                run_forward_gate_research(
+                    enriched
+                )
+            )
+
+            st.session_state[
+                "v37_forward_research_result"
+            ] = research
+
+            return enriched
+
+    except Exception:
+        return None
+
+    return None
+
+
+# ============================================================
+# FLEXIBLE v3.8 UI CALLER
+# ============================================================
+
+def call_v38_ui(
     result,
+    enriched,
     daily_bars,
-    market_daily,
     settings,
 ):
 
-    if not callable(
-        render_v38_validation_lab
-    ):
+    if not V38_AVAILABLE:
+
+        st.error(
+            "production_vs_challenger_ui.py "
+            "could not be loaded."
+        )
+
+        if V38_IMPORT_ERROR:
+
+            st.code(
+                V38_IMPORT_ERROR
+            )
+
         return
-
-    available = {
-        "result": result,
-        "backtest_result": result,
-        "production_result": result,
-
-        "daily_bars": daily_bars,
-        "daily_history": daily_bars,
-        "stock_daily_bars": daily_bars,
-
-        "market_daily": market_daily,
-        "market_daily_bars": market_daily,
-
-        "settings": settings,
-        "backtest_settings": settings,
-    }
 
     try:
 
         signature = inspect.signature(
-            render_v38_validation_lab
+            render_production_vs_challenger_lab
         )
 
         kwargs = {}
 
-        for name, parameter in signature.parameters.items():
+        for parameter_name in signature.parameters:
 
-            if name in available:
+            name = parameter_name.lower()
+
+            if name in {
+                "backtest_result",
+                "result",
+                "res",
+            }:
 
                 kwargs[
-                    name
-                ] = available[
-                    name
-                ]
+                    parameter_name
+                ] = result
 
-        if kwargs:
+            elif name in {
+                "enriched_signal_log",
+                "signal_log",
+                "historical_signal_log",
+                "forward_signal_log",
+                "historical_signal_audit",
+            }:
 
-            return render_v38_validation_lab(
+                kwargs[
+                    parameter_name
+                ] = enriched
+
+            elif name in {
+                "daily_bars",
+                "daily_history",
+                "historical_daily_bars",
+            }:
+
+                kwargs[
+                    parameter_name
+                ] = daily_bars
+
+            elif name in {
+                "settings",
+                "backtest_settings",
+                "config",
+                "configuration",
+            }:
+
+                kwargs[
+                    parameter_name
+                ] = settings
+
+        required_unknown = []
+
+        for name, parameter in (
+            signature.parameters.items()
+        ):
+
+            if (
+                parameter.default
+                is inspect.Parameter.empty
+                and parameter.kind
+                not in {
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                }
+                and name not in kwargs
+            ):
+
+                required_unknown.append(
+                    name
+                )
+
+        if not required_unknown:
+
+            render_production_vs_challenger_lab(
                 **kwargs
             )
 
-    except Exception:
-        pass
+            return
+
+    except Exception as exc:
+
+        first_error = exc
+
+    else:
+        first_error = None
 
     attempts = [
         (
             result,
+            enriched,
             daily_bars,
-            market_daily,
             settings,
         ),
         (
             result,
+            enriched,
             daily_bars,
-            market_daily,
         ),
         (
             result,
+            enriched,
+        ),
+        (
+            enriched,
             daily_bars,
+            settings,
+        ),
+        (
+            enriched,
+            settings,
+        ),
+        (
+            enriched,
         ),
         (
             result,
         ),
     ]
 
-    last_error = None
+    last_error = first_error
 
     for args in attempts:
 
         try:
 
-            return render_v38_validation_lab(
+            render_production_vs_challenger_lab(
                 *args
             )
 
-        except TypeError as exc:
+            return
 
+        except TypeError as exc:
             last_error = exc
-            continue
+
+        except Exception as exc:
+
+            st.error(
+                "v3.8 loaded successfully, but "
+                "the validation engine encountered "
+                "an internal error."
+            )
+
+            st.exception(
+                exc
+            )
+
+            return
+
+    st.error(
+        "The v3.8 UI function signature does "
+        "not match the current app.py."
+    )
 
     if last_error:
-        raise last_error
+        st.exception(
+            last_error
+        )
 
 
 # ============================================================
@@ -878,10 +1009,6 @@ with st.sidebar:
         value=True,
     )
 
-    st.caption(
-        "Phone numbers and Twilio credentials stay in Streamlit Secrets."
-    )
-
     if sms_enabled:
 
         if sms_configured():
@@ -893,27 +1020,20 @@ with st.sidebar:
         else:
 
             st.warning(
-                "SMS secrets are not configured yet."
+                "SMS secrets are not configured."
             )
 
     st.divider()
 
-    st.subheader(
-        "Tracked positions"
-    )
-
     tracked_positions = st.text_input(
         "Symbols you currently hold",
         "",
-        help=(
-            "Example: NVDA,MU,OWL. SELL-risk alerts are evaluated "
-            "only for symbols entered here."
-        ),
+        help="Example: NVDA,MU,OWL",
     )
 
 
 # ============================================================
-# LIVE SCANNER
+# TAB 1 — LIVE SCANNER
 # ============================================================
 
 with tab1:
@@ -922,16 +1042,9 @@ with tab1:
         "Full U.S. Market Swing-Trade Scanner"
     )
 
-    st.write(
-        "The scanner removes unsuitable securities and illiquid stocks, "
-        "then analyzes daily swing structure and live intraday momentum separately."
-    )
-
     st.info(
-        "v3.8 does NOT automatically replace the production BUY rules. "
-        "The live scanner continues to require its existing high-conviction "
-        "daily and intraday confirmations while challenger rules are researched "
-        "separately."
+        "Production BUY rules remain unchanged. "
+        "v3.7 and v3.8 are research layers only."
     )
 
     c1, c2 = st.columns(
@@ -945,9 +1058,6 @@ with tab1:
             "sip",
         ],
         index=0,
-        help=(
-            "Use SIP when your Alpaca plan supports consolidated market data."
-        ),
     )
 
     finalists_n = c2.slider(
@@ -979,10 +1089,6 @@ with tab1:
 
         try:
 
-            # =================================================
-            # 1. UNIVERSE
-            # =================================================
-
             status.write(
                 "1/5 Filtering eligible U.S. securities..."
             )
@@ -993,11 +1099,6 @@ with tab1:
 
             universe = (
                 elig.symbol.tolist()
-            )
-
-            status.write(
-                f"Eligible after type filtering: "
-                f"{len(universe):,}"
             )
 
             now = datetime.now(
@@ -1011,12 +1112,8 @@ with tab1:
                 )
             )
 
-            # =================================================
-            # 2. PREFILTER
-            # =================================================
-
             status.write(
-                "2/5 Applying price, liquidity, trend and momentum filters..."
+                "2/5 Applying liquidity and momentum filters..."
             )
 
             def prog(
@@ -1052,7 +1149,9 @@ with tab1:
             if daily.empty:
 
                 status.update(
-                    label="No daily market data returned.",
+                    label=(
+                        "No daily market data returned."
+                    ),
                     state="error",
                 )
 
@@ -1079,27 +1178,20 @@ with tab1:
             if finalists.empty:
 
                 status.update(
-                    label="No qualifying finalists found.",
+                    label=(
+                        "No qualifying finalists found."
+                    ),
                     state="complete",
                 )
 
                 st.stop()
 
-            status.write(
-                f"Finalists after eligibility filters: "
-                f"{len(finalists)}"
-            )
-
             progress.progress(
                 45
             )
 
-            # =================================================
-            # 3. LONG DAILY HISTORY
-            # =================================================
-
             status.write(
-                "3/5 Pulling longer daily history for swing analysis..."
+                "3/5 Pulling long daily history..."
             )
 
             finalist_symbols = (
@@ -1163,8 +1255,6 @@ with tab1:
                     ]
                     == "SPY"
                 ].copy()
-                if not market_daily.empty
-                else pd.DataFrame()
             )
 
             qqq_daily = (
@@ -1174,8 +1264,6 @@ with tab1:
                     ]
                     == "QQQ"
                 ].copy()
-                if not market_daily.empty
-                else pd.DataFrame()
             )
 
             leadership_map = (
@@ -1188,12 +1276,8 @@ with tab1:
                 60
             )
 
-            # =================================================
-            # 4. INTRADAY
-            # =================================================
-
             status.write(
-                "4/5 Pulling intraday bars for finalists and SPY..."
+                "4/5 Pulling intraday confirmation..."
             )
 
             market_start = now.replace(
@@ -1229,14 +1313,15 @@ with tab1:
                 feed,
             )
 
-            progress.progress(
-                75
-            )
-
-            if intra.empty or spy.empty:
+            if (
+                intra.empty
+                or spy.empty
+            ):
 
                 status.update(
-                    label="No intraday bars returned.",
+                    label=(
+                        "No intraday data returned."
+                    ),
                     state="error",
                 )
 
@@ -1310,12 +1395,12 @@ with tab1:
                 )
             )
 
-            # =================================================
-            # 5. SCORE
-            # =================================================
+            progress.progress(
+                75
+            )
 
             status.write(
-                "5/5 Applying swing, risk and intraday confirmation rules..."
+                "5/5 Applying production BUY gates..."
             )
 
             rows = []
@@ -1359,16 +1444,16 @@ with tab1:
                     else None
                 )
 
-                p = prepare_intraday(
+                prepared = prepare_intraday(
                     d,
                     spy_today,
                     adv_shares,
                 )
 
-                if p.empty:
+                if prepared.empty:
                     continue
 
-                r = p.iloc[
+                intraday_row = prepared.iloc[
                     -1
                 ]
 
@@ -1377,29 +1462,25 @@ with tab1:
                     intraday_signal,
                     reasons,
                 ) = classify(
-                    r,
+                    intraday_row,
                     advmap.get(
                         sym,
                         0,
                     ),
                 )
 
-                stock_swing_daily = (
+                stock_daily = swing_daily[
                     swing_daily[
-                        swing_daily[
-                            "symbol"
-                        ]
-                        == sym
-                    ].copy()
-                    if not swing_daily.empty
-                    else pd.DataFrame()
-                )
+                        "symbol"
+                    ]
+                    == sym
+                ].copy()
 
-                if stock_swing_daily.empty:
+                if stock_daily.empty:
                     continue
 
                 swing = score_swing_daily(
-                    stock_swing_daily,
+                    stock_daily,
                     spy_daily,
                     qqq_daily,
                     leadership_map.get(
@@ -1410,7 +1491,7 @@ with tab1:
                 if not swing:
                     continue
 
-                final_signal, confluence_reason = (
+                final_signal, decision = (
                     combine_daily_intraday_signal(
                         swing.get(
                             "signal",
@@ -1425,13 +1506,6 @@ with tab1:
                             )
                         ),
                     )
-                )
-
-                intraday_confirmed = bool(
-                    intraday_signal
-                    == "BUY"
-                    and intraday_score
-                    >= 85
                 )
 
                 rows.append(
@@ -1456,7 +1530,7 @@ with tab1:
                         ),
                         "price": round(
                             float(
-                                r.close
+                                intraday_row.close
                             ),
                             2,
                         ),
@@ -1478,52 +1552,6 @@ with tab1:
                         "reward_risk": swing.get(
                             "reward_risk"
                         ),
-                        "intraday_signal": intraday_signal,
-                        "intraday_score": intraday_score,
-                        "change_today_%": round(
-                            safe_float(
-                                r.get(
-                                    "stock_ret",
-                                    0,
-                                )
-                            )
-                            * 100,
-                            2,
-                        ),
-                        "rel_volume": round(
-                            safe_float(
-                                r.get(
-                                    "rel_volume",
-                                    0,
-                                )
-                            ),
-                            2,
-                        ),
-                        "vwap": round(
-                            safe_float(
-                                r.get(
-                                    "vwap",
-                                    r.close,
-                                )
-                            ),
-                            2,
-                        ),
-                        "intraday_rsi": round(
-                            safe_float(
-                                r.get(
-                                    "rsi",
-                                    50,
-                                ),
-                                50,
-                            ),
-                            1,
-                        ),
-                        "swing_rsi": swing.get(
-                            "rsi14"
-                        ),
-                        "swing_rvol": swing.get(
-                            "rvol"
-                        ),
                         "risk_flag": bool(
                             swing.get(
                                 "risk_flag",
@@ -1533,13 +1561,6 @@ with tab1:
                         "risk_reason": swing.get(
                             "risk_reason",
                             "",
-                        ),
-                        "gap_down_pct": swing.get(
-                            "gap_down_pct",
-                            0,
-                        ),
-                        "event_days_ago": swing.get(
-                            "event_days_ago"
                         ),
                         "trend_health": bool(
                             swing.get(
@@ -1557,24 +1578,44 @@ with tab1:
                         "market_score": swing.get(
                             "market_score"
                         ),
-                        "intraday_confirmed": intraday_confirmed,
+                        "intraday_signal": intraday_signal,
+                        "intraday_score": intraday_score,
+                        "intraday_confirmed": bool(
+                            intraday_signal
+                            == "BUY"
+                            and intraday_score
+                            >= 85
+                        ),
+                        "vwap": round(
+                            safe_float(
+                                intraday_row.get(
+                                    "vwap"
+                                )
+                            ),
+                            2,
+                        ),
+                        "rel_volume": round(
+                            safe_float(
+                                intraday_row.get(
+                                    "rel_volume"
+                                )
+                            ),
+                            2,
+                        ),
                         "vs_SPY_%": round(
                             safe_float(
-                                r.get(
-                                    "rs",
-                                    0,
+                                intraday_row.get(
+                                    "rs"
                                 )
                             )
                             * 100,
                             2,
                         ),
-                        "security_type": ref.get(
-                            "security_type",
-                            "Common-stock candidate",
-                        ),
-                        "decision": confluence_reason,
-                        "intraday_reasons": "; ".join(
-                            reasons
+                        "decision": decision,
+                        "intraday_reasons": (
+                            "; ".join(
+                                reasons
+                            )
                         ),
                     }
                 )
@@ -1588,7 +1629,9 @@ with tab1:
             )
 
             status.update(
-                label="Swing scan complete.",
+                label=(
+                    "Swing scan complete."
+                ),
                 state="complete",
                 expanded=False,
             )
@@ -1601,7 +1644,7 @@ with tab1:
 
             else:
 
-                rank = {
+                signal_rank = {
                     "A+ SWING BUY": 0,
                     "BUY": 1,
                     "WATCH": 2,
@@ -1618,7 +1661,7 @@ with tab1:
                         "signal"
                     ]
                     .map(
-                        rank
+                        signal_rank
                     )
                     .fillna(
                         6
@@ -1673,25 +1716,21 @@ with tab1:
                     == "TOO EXTENDED"
                 ]
 
-                # =================================================
-                # SMS
-                # =================================================
-
                 if (
                     sms_enabled
                     and sms_configured()
                 ):
-
-                    sent = []
 
                     if (
                         sms_buy_enabled
                         and not buys.empty
                     ):
 
-                        for _, alert_row in buys.head(
-                            5
-                        ).iterrows():
+                        for _, alert_row in (
+                            buys.head(
+                                5
+                            ).iterrows()
+                        ):
 
                             try:
 
@@ -1701,24 +1740,21 @@ with tab1:
                                     )
                                 )
 
-                                sent.append(
-                                    f"BUY {alert_row['symbol']}"
-                                )
-
-                            except Exception as sms_error:
+                            except Exception as exc:
 
                                 st.warning(
-                                    f"Could not text BUY alert for "
-                                    f"{alert_row['symbol']}: {sms_error}"
+                                    f"BUY SMS failed for "
+                                    f"{alert_row['symbol']}: "
+                                    f"{exc}"
                                 )
 
                     held = {
-                        x.strip().upper()
-                        for x
+                        symbol.strip().upper()
+                        for symbol
                         in tracked_positions.split(
                             ","
                         )
-                        if x.strip()
+                        if symbol.strip()
                     }
 
                     if (
@@ -1734,60 +1770,37 @@ with tab1:
                             )
                         ]
 
-                        for _, alert_row in held_rows.iterrows():
+                        for _, alert_row in (
+                            held_rows.iterrows()
+                        ):
 
-                            sell_reasons = []
+                            reasons = []
 
-                            current_price = safe_float(
+                            if safe_float(
                                 alert_row.get(
                                     "price"
                                 )
-                            )
-
-                            current_vwap = safe_float(
+                            ) < safe_float(
                                 alert_row.get(
                                     "vwap"
                                 )
-                            )
+                            ):
 
-                            current_intraday_score = safe_int(
-                                alert_row.get(
-                                    "intraday_score"
-                                )
-                            )
-
-                            current_intraday_signal = str(
-                                alert_row.get(
-                                    "intraday_signal",
-                                    "",
-                                )
-                            ).upper()
-
-                            if current_price < current_vwap:
-
-                                sell_reasons.append(
+                                reasons.append(
                                     "price below VWAP"
                                 )
 
-                            if current_intraday_score < 60:
+                            if safe_int(
+                                alert_row.get(
+                                    "intraday_score"
+                                )
+                            ) < 60:
 
-                                sell_reasons.append(
-                                    f"intraday score fell to "
-                                    f"{current_intraday_score}"
+                                reasons.append(
+                                    "intraday momentum weakened"
                                 )
 
-                            sell_risk = (
-                                current_intraday_signal
-                                in {
-                                    "AVOID",
-                                    "NO BUY",
-                                }
-                                and bool(
-                                    sell_reasons
-                                )
-                            )
-
-                            if sell_risk:
+                            if reasons:
 
                                 try:
 
@@ -1800,35 +1813,13 @@ with tab1:
                                                 "price"
                                             ],
                                             ", ".join(
-                                                sell_reasons
+                                                reasons
                                             ),
                                         )
                                     )
 
-                                    sent.append(
-                                        f"SELL-RISK "
-                                        f"{alert_row['symbol']}"
-                                    )
-
-                                except Exception as sms_error:
-
-                                    st.warning(
-                                        f"Could not text SELL alert for "
-                                        f"{alert_row['symbol']}: {sms_error}"
-                                    )
-
-                    if sent:
-
-                        st.info(
-                            "Text alerts sent: "
-                            + ", ".join(
-                                sent
-                            )
-                        )
-
-                # =================================================
-                # RESULTS
-                # =================================================
+                                except Exception:
+                                    pass
 
                 st.divider()
 
@@ -1836,11 +1827,18 @@ with tab1:
                     "Current Market Decision"
                 )
 
-                if not buys.empty:
+                if buys.empty:
+
+                    st.error(
+                        "🔴 NO CONFIRMED SWING BUY RIGHT NOW"
+                    )
+
+                else:
 
                     st.success(
-                        f"🟢 {len(buys)} CONFIRMED SWING BUY "
-                        f"{'SIGNAL' if len(buys) == 1 else 'SIGNALS'}"
+                        f"🟢 {len(buys)} CONFIRMED "
+                        f"SWING BUY SIGNAL"
+                        f"{'S' if len(buys) != 1 else ''}"
                     )
 
                     st.write(
@@ -1848,20 +1846,9 @@ with tab1:
                             buys[
                                 "symbol"
                             ].head(
-                                8
+                                10
                             )
                         )
-                    )
-
-                else:
-
-                    st.error(
-                        "🔴 NO CONFIRMED SWING BUY RIGHT NOW"
-                    )
-
-                    st.caption(
-                        "Do not buy simply because a stock has a high "
-                        "Swing Score. Wait for BUY or A+ SWING BUY."
                     )
 
                 m1, m2, m3, m4 = st.columns(
@@ -1876,7 +1863,7 @@ with tab1:
                 )
 
                 m2.metric(
-                    "Confirmed BUYs",
+                    "BUYs",
                     len(
                         buys
                     ),
@@ -1890,7 +1877,7 @@ with tab1:
                 )
 
                 m4.metric(
-                    "TOO EXTENDED",
+                    "Extended",
                     len(
                         extended
                     ),
@@ -1900,10 +1887,6 @@ with tab1:
 
                 st.header(
                     "Top 5 Swing Opportunities"
-                )
-
-                st.caption(
-                    "WATCH means wait. It does not mean buy now."
                 )
 
                 for rank_num, (_, row) in enumerate(
@@ -1927,36 +1910,16 @@ with tab1:
                 if buys.empty:
 
                     st.info(
-                        "No confirmed BUY signals right now."
+                        "No confirmed BUY signals."
                     )
 
                 else:
 
-                    for _, row in buys.head(
-                        10
-                    ).iterrows():
-
-                        render_trade_card(
-                            row
-                        )
-
-                st.divider()
-
-                st.header(
-                    "🔴 Strong But Too Extended"
-                )
-
-                if extended.empty:
-
-                    st.write(
-                        "None."
-                    )
-
-                else:
-
-                    for _, row in extended.head(
-                        5
-                    ).iterrows():
+                    for _, row in (
+                        buys.head(
+                            10
+                        ).iterrows()
+                    ):
 
                         render_trade_card(
                             row
@@ -1976,120 +1939,9 @@ with tab1:
 
                 else:
 
-                    watch_columns = [
-                        c
-                        for c in [
-                            "symbol",
-                            "signal",
-                            "swing_score",
-                            "setup",
-                            "price",
-                            "entry_low",
-                            "entry_high",
-                        ]
-                        if c in watches.columns
-                    ]
-
                     st.dataframe(
-                        watches[
-                            watch_columns
-                        ].head(
+                        watches.head(
                             30
-                        ),
-                        width="stretch",
-                        hide_index=True,
-                    )
-
-                st.divider()
-
-                st.header(
-                    "Stock Detail"
-                )
-
-                selected_symbol = st.selectbox(
-                    "Select a stock",
-                    out[
-                        "symbol"
-                    ].tolist(),
-                )
-
-                selected = out[
-                    out[
-                        "symbol"
-                    ]
-                    == selected_symbol
-                ].iloc[
-                    0
-                ]
-
-                render_trade_card(
-                    selected
-                )
-
-                st.write(
-                    f"**Today's change:** "
-                    f"{safe_float(selected.get('change_today_%')):.2f}%"
-                )
-
-                st.write(
-                    f"**Relative volume:** "
-                    f"{safe_float(selected.get('rel_volume')):.2f}x"
-                )
-
-                st.write(
-                    f"**Relative strength vs SPY:** "
-                    f"{safe_float(selected.get('vs_SPY_%')):.2f}%"
-                )
-
-                st.write(
-                    f"**Decision reason:** "
-                    f"{selected.get('decision', '')}"
-                )
-
-                with st.expander(
-                    "Show full research table"
-                ):
-
-                    display_columns = [
-                        c
-                        for c in [
-                            "symbol",
-                            "name",
-                            "signal",
-                            "swing_score",
-                            "setup",
-                            "entry_quality",
-                            "price",
-                            "entry_low",
-                            "entry_high",
-                            "stop",
-                            "target1",
-                            "target2",
-                            "reward_risk",
-                            "risk_flag",
-                            "risk_reason",
-                            "gap_down_pct",
-                            "event_days_ago",
-                            "trend_health",
-                            "distribution_days",
-                            "leadership_percentile",
-                            "market_score",
-                            "intraday_confirmed",
-                            "intraday_signal",
-                            "intraday_score",
-                            "change_today_%",
-                            "rel_volume",
-                            "vs_SPY_%",
-                            "decision",
-                        ]
-                        if c in out.columns
-                    ]
-
-                    st.dataframe(
-                        out[
-                            display_columns
-                        ].head(
-                            50
                         ),
                         width="stretch",
                         hide_index=True,
@@ -2102,7 +1954,9 @@ with tab1:
                     ).encode(
                         "utf-8"
                     ),
-                    file_name="v3_8_swing_scan_latest.csv",
+                    file_name=(
+                        "v3_8_swing_scan_latest.csv"
+                    ),
                     mime="text/csv",
                     width="stretch",
                 )
@@ -2110,23 +1964,19 @@ with tab1:
         except Exception as exc:
 
             status.update(
-                label="Scan stopped because of an error.",
+                label=(
+                    "Scan stopped because of an error."
+                ),
                 state="error",
             )
 
-            st.error(
-                str(
-                    exc
-                )
-            )
-
-            st.info(
-                "If SIP entitlement is mentioned, choose IEX."
+            st.exception(
+                exc
             )
 
 
 # ============================================================
-# BACKTEST TAB
+# TAB 2 — BACKTEST
 # ============================================================
 
 with tab2:
@@ -2136,15 +1986,9 @@ with tab2:
     )
 
     st.info(
-        "The production backtest reconstructs the historical daily and "
-        "intraday decision chain. v3.8 additionally stores the historical "
-        "datasets so Production and Challenger portfolios can be compared "
-        "using the same sample."
-    )
-
-    st.warning(
-        "Results cover only the symbols entered below. This is not a "
-        "complete historical reconstruction of the entire U.S. stock market."
+        "Run this first. The completed backtest is automatically "
+        "saved for Calibration, v3.7 Forward Research and v3.8 "
+        "Production-vs-Challenger validation."
     )
 
     c1, c2, c3 = st.columns(
@@ -2159,7 +2003,7 @@ with tab2:
         - timedelta(
             days=180
         ),
-        key="swing_bt_start",
+        key="bt_start",
     )
 
     end_date = c2.date_input(
@@ -2170,7 +2014,7 @@ with tab2:
         - timedelta(
             days=1
         ),
-        key="swing_bt_end",
+        key="bt_end",
     )
 
     risk_pct = (
@@ -2180,7 +2024,6 @@ with tab2:
             2.0,
             0.50,
             0.25,
-            key="swing_bt_risk",
         )
         / 100
     )
@@ -2194,8 +2037,6 @@ with tab2:
         1,
         5,
         3,
-        1,
-        key="swing_bt_positions",
     )
 
     max_holding_days = c5.slider(
@@ -2204,18 +2045,16 @@ with tab2:
         30,
         20,
         5,
-        key="swing_bt_hold",
     )
 
     scan_time = c6.selectbox(
-        "Historical scan time (ET)",
+        "Historical scan time",
         [
             "11:30",
             "14:00",
             "15:30",
         ],
         index=0,
-        key="swing_bt_time",
     )
 
     c7, c8 = st.columns(
@@ -2223,33 +2062,24 @@ with tab2:
     )
 
     slippage_bps = c7.slider(
-        "Estimated slippage (basis points per order)",
+        "Slippage bps",
         0,
         25,
         5,
-        1,
-        key="swing_bt_slippage",
     )
 
     commission_bps = c8.slider(
-        "Estimated fees (basis points per order)",
+        "Commission bps",
         0,
         10,
         0,
-        1,
-        key="swing_bt_fees",
     )
 
-    symbols = st.text_input(
+    symbols_text = st.text_input(
         "Backtest symbols",
         (
             "NVDA,MU,AMD,MRVL,FSLR,RIOT,"
             "MSFT,AMZN,META,PLTR,AVGO,ANET"
-        ),
-        key="swing_bt_symbols",
-        help=(
-            "Use at least 10 liquid stocks for a more meaningful "
-            "relative-strength comparison group."
         ),
     )
 
@@ -2260,12 +2090,6 @@ with tab2:
             "sip",
         ],
         index=0,
-        key="swing_bt_feed",
-    )
-
-    st.caption(
-        "Use SIP when your Alpaca plan permits consolidated data. "
-        "Otherwise use IEX."
     )
 
     if st.button(
@@ -2274,10 +2098,10 @@ with tab2:
         width="stretch",
     ):
 
-        syms = [
+        symbols = [
             x.strip().upper()
             for x
-            in symbols.split(
+            in symbols_text.split(
                 ","
             )
             if x.strip()
@@ -2286,38 +2110,10 @@ with tab2:
         if start_date >= end_date:
 
             st.error(
-                "Choose a start date before the end date."
+                "Start date must be before end date."
             )
 
             st.stop()
-
-        if len(
-            syms
-        ) < 5:
-
-            st.error(
-                "Enter at least 5 symbols."
-            )
-
-            st.stop()
-
-        if len(
-            syms
-        ) < 10:
-
-            st.warning(
-                "Ten or more symbols are recommended."
-            )
-
-        if (
-            end_date
-            - start_date
-        ).days > 365:
-
-            st.warning(
-                "A range longer than one year can be slow. "
-                "Six to twelve months is a good first test."
-            )
 
         request_end = (
             end_date
@@ -2338,13 +2134,13 @@ with tab2:
         ):
 
             bars = get_bars_batched(
-                syms,
+                symbols,
                 start_date,
                 request_end,
                 "1Min",
                 btfeed,
                 batch_size=20,
-                pause_seconds=0.1,
+                pause_seconds=0.10,
             )
 
             market_minutes = get_bars(
@@ -2359,13 +2155,13 @@ with tab2:
             )
 
             daily_history = get_bars_batched(
-                syms,
+                symbols,
                 warmup_start,
                 request_end,
                 "1Day",
                 btfeed,
                 batch_size=100,
-                pause_seconds=0.1,
+                pause_seconds=0.10,
             )
 
             market_daily = get_bars(
@@ -2379,546 +2175,395 @@ with tab2:
                 btfeed,
             )
 
-        if market_minutes.empty:
-
-            spy = pd.DataFrame()
-            qqq = pd.DataFrame()
-
-        else:
-
-            spy = market_minutes[
-                market_minutes[
-                    "symbol"
-                ]
-                == "SPY"
-            ].copy()
-
-            qqq = market_minutes[
-                market_minutes[
-                    "symbol"
-                ]
-                == "QQQ"
-            ].copy()
-
         if (
             bars.empty
-            or spy.empty
-            or qqq.empty
             or daily_history.empty
+            or market_minutes.empty
             or market_daily.empty
-            or not {
-                "SPY",
-                "QQQ",
-            }.issubset(
-                set(
-                    market_daily[
-                        "symbol"
-                    ]
-                )
-            )
         ):
 
             st.error(
-                "The complete daily and minute history was not returned. "
-                "Try a shorter range or choose IEX."
+                "Complete historical data was not returned."
+            )
+
+            st.stop()
+
+        spy = market_minutes[
+            market_minutes[
+                "symbol"
+            ]
+            == "SPY"
+        ].copy()
+
+        qqq = market_minutes[
+            market_minutes[
+                "symbol"
+            ]
+            == "QQQ"
+        ].copy()
+
+        complete_symbols = sorted(
+            set(
+                bars[
+                    "symbol"
+                ]
+            )
+            & set(
+                daily_history[
+                    "symbol"
+                ]
+            )
+        )
+
+        if len(
+            complete_symbols
+        ) < 5:
+
+            st.error(
+                "Fewer than five symbols returned complete data."
+            )
+
+            st.stop()
+
+        bars = bars[
+            bars[
+                "symbol"
+            ].isin(
+                complete_symbols
+            )
+        ].copy()
+
+        daily_history = daily_history[
+            daily_history[
+                "symbol"
+            ].isin(
+                complete_symbols
+            )
+        ].copy()
+
+        with st.spinner(
+            "Running production-equivalent backtest..."
+        ):
+
+            result = swing_backtest(
+                bars,
+                spy,
+                qqq_bars=qqq,
+                daily_bars=daily_history,
+                market_daily_bars=market_daily,
+                starting_capital=2000,
+                risk_pct=risk_pct,
+                max_positions=max_positions,
+                max_holding_days=max_holding_days,
+                scan_time=scan_time,
+                slippage_bps=slippage_bps,
+                commission_bps=commission_bps,
+            )
+
+        st.session_state[
+            "latest_backtest_result"
+        ] = result
+
+        st.session_state[
+            "latest_backtest_daily_bars"
+        ] = daily_history.copy()
+
+        st.session_state[
+            "latest_backtest_market_daily"
+        ] = market_daily.copy()
+
+        st.session_state[
+            "latest_backtest_settings"
+        ] = {
+            "symbols": ",".join(
+                complete_symbols
+            ),
+            "start": str(
+                start_date
+            ),
+            "end": str(
+                end_date
+            ),
+            "risk_pct": risk_pct,
+            "max_positions": max_positions,
+            "max_holding_days": max_holding_days,
+            "scan_time": scan_time,
+            "slippage_bps": slippage_bps,
+            "commission_bps": commission_bps,
+            "feed": btfeed,
+            "version": "v3.8",
+        }
+
+        # Reset old research whenever a new backtest is run.
+        st.session_state[
+            "v37_enriched_signal_log"
+        ] = None
+
+        st.session_state[
+            "v37_forward_research_result"
+        ] = None
+
+        # ----------------------------------------------------
+        # CRITICAL v3.8 FIX:
+        # Automatically construct the enriched forward dataset.
+        # ----------------------------------------------------
+
+        enriched = (
+            build_v37_dataset_if_possible()
+        )
+
+        stats = result.get(
+            "stats",
+            {},
+        )
+
+        st.success(
+            "Production backtest completed."
+        )
+
+        if (
+            isinstance(
+                enriched,
+                pd.DataFrame,
+            )
+            and not enriched.empty
+        ):
+
+            st.success(
+                f"v3.8 research dataset automatically prepared: "
+                f"{len(enriched):,} historical scanner observations."
             )
 
         else:
 
-            complete_symbols = sorted(
-                set(
-                    bars[
-                        "symbol"
-                    ]
-                )
-                & set(
-                    daily_history[
-                        "symbol"
-                    ]
-                )
+            st.warning(
+                "The production backtest completed, but the "
+                "v3.7 forward-return dataset could not yet be "
+                "built automatically. Open the v3.7 tab."
             )
 
-            missing_symbols = sorted(
-                set(
-                    syms
-                )
-                - set(
-                    complete_symbols
-                )
+        cols = st.columns(
+            4
+        )
+
+        cols[
+            0
+        ].metric(
+            "Ending $",
+            stats.get(
+                "ending_capital",
+                "—",
+            ),
+        )
+
+        cols[
+            1
+        ].metric(
+            "Return %",
+            stats.get(
+                "total_return_pct",
+                "—",
+            ),
+        )
+
+        cols[
+            2
+        ].metric(
+            "Win rate %",
+            stats.get(
+                "win_rate_pct",
+                "—",
+            ),
+        )
+
+        cols[
+            3
+        ].metric(
+            "Profit factor",
+            stats.get(
+                "profit_factor",
+                "—",
+            ),
+        )
+
+        cols2 = st.columns(
+            4
+        )
+
+        cols2[
+            0
+        ].metric(
+            "Max DD %",
+            stats.get(
+                "max_drawdown_pct",
+                "—",
+            ),
+        )
+
+        cols2[
+            1
+        ].metric(
+            "Trades",
+            stats.get(
+                "trades",
+                "—",
+            ),
+        )
+
+        cols2[
+            2
+        ].metric(
+            "Expectancy",
+            f"{safe_float(stats.get('expectancy_r')):.3f} R",
+        )
+
+        cols2[
+            3
+        ].metric(
+            "Avg Trade $",
+            stats.get(
+                "avg_trade_dollars",
+                "—",
+            ),
+        )
+
+        diagnostics = result.get(
+            "diagnostics",
+            {},
+        )
+
+        funnel = diagnostics.get(
+            "funnel",
+            pd.DataFrame(),
+        )
+
+        gate_failures = diagnostics.get(
+            "gate_failures",
+            pd.DataFrame(),
+        )
+
+        near_misses = diagnostics.get(
+            "near_misses",
+            pd.DataFrame(),
+        )
+
+        st.divider()
+
+        st.subheader(
+            "BUY Confirmation Funnel"
+        )
+
+        if isinstance(
+            funnel,
+            pd.DataFrame,
+        ) and not funnel.empty:
+
+            st.dataframe(
+                funnel,
+                width="stretch",
+                hide_index=True,
             )
 
-            if missing_symbols:
+        if isinstance(
+            gate_failures,
+            pd.DataFrame,
+        ) and not gate_failures.empty:
 
-                st.warning(
-                    "Excluded symbols with incomplete data: "
-                    + ", ".join(
-                        missing_symbols
-                    )
-                )
-
-            if len(
-                complete_symbols
-            ) < 5:
-
-                st.error(
-                    "Fewer than 5 symbols returned complete data."
-                )
-
-                st.stop()
-
-            bars = bars[
-                bars[
-                    "symbol"
-                ].isin(
-                    complete_symbols
-                )
-            ].copy()
-
-            daily_history = daily_history[
-                daily_history[
-                    "symbol"
-                ].isin(
-                    complete_symbols
-                )
-            ].copy()
-
-            with st.spinner(
-                "Running production-equivalent portfolio simulation..."
-            ):
-
-                res = swing_backtest(
-                    bars,
-                    spy,
-                    qqq_bars=qqq,
-                    daily_bars=daily_history,
-                    market_daily_bars=market_daily,
-                    starting_capital=2000,
-                    risk_pct=risk_pct,
-                    max_positions=max_positions,
-                    max_holding_days=max_holding_days,
-                    scan_time=scan_time,
-                    slippage_bps=slippage_bps,
-                    commission_bps=commission_bps,
-                )
-
-            # =================================================
-            # SAVE EVERYTHING NEEDED FOR v3.8
-            # =================================================
-
-            st.session_state.latest_backtest_result = res
-
-            st.session_state.latest_backtest_daily_bars = (
-                daily_history.copy()
+            st.markdown(
+                "#### Most Common Failed BUY Gates"
             )
 
-            st.session_state.latest_backtest_market_daily = (
-                market_daily.copy()
-            )
-
-            st.session_state.latest_backtest_minute_bars = (
-                bars.copy()
-            )
-
-            st.session_state.latest_backtest_spy_minutes = (
-                spy.copy()
-            )
-
-            st.session_state.latest_backtest_qqq_minutes = (
-                qqq.copy()
-            )
-
-            st.session_state.latest_backtest_settings = {
-                "symbols": ",".join(
-                    complete_symbols
+            st.dataframe(
+                gate_failures.head(
+                    12
                 ),
-                "start": str(
-                    start_date
-                ),
-                "end": str(
-                    end_date
-                ),
-                "risk_pct": risk_pct,
-                "max_positions": max_positions,
-                "max_holding_days": max_holding_days,
-                "scan_time": scan_time,
-                "slippage_bps": slippage_bps,
-                "commission_bps": commission_bps,
-                "feed": btfeed,
-                "version": APP_VERSION,
-            }
-
-            stats = res.get(
-                "stats",
-                {},
+                width="stretch",
+                hide_index=True,
             )
 
-            st.success(
-                "Production backtest completed and v3.8 research data saved."
-            )
-
-            cols = st.columns(
-                4
-            )
-
-            cols[
-                0
-            ].metric(
-                "Ending $",
-                stats.get(
-                    "ending_capital",
-                    "—",
-                ),
-            )
-
-            cols[
-                1
-            ].metric(
-                "Return %",
-                stats.get(
-                    "total_return_pct",
-                    "—",
-                ),
-            )
-
-            cols[
-                2
-            ].metric(
-                "Win rate %",
-                stats.get(
-                    "win_rate_pct",
-                    "—",
-                ),
-            )
-
-            cols[
-                3
-            ].metric(
-                "Profit factor",
-                stats.get(
-                    "profit_factor",
-                    "—",
-                ),
-            )
-
-            cols2 = st.columns(
-                4
-            )
-
-            cols2[
-                0
-            ].metric(
-                "Max DD %",
-                stats.get(
-                    "max_drawdown_pct",
-                    "—",
-                ),
-            )
-
-            cols2[
-                1
-            ].metric(
-                "Trades",
-                stats.get(
-                    "trades",
-                    "—",
-                ),
-            )
-
-            cols2[
-                2
-            ].metric(
-                "Average expectancy",
-                f"{safe_float(stats.get('expectancy_r')):.3f} R",
-            )
-
-            cols2[
-                3
-            ].metric(
-                "Average trade $",
-                stats.get(
-                    "avg_trade_dollars",
-                    "—",
-                ),
-            )
-
-            for warning in res.get(
-                "warnings",
-                [],
-            ):
-
-                st.warning(
-                    warning
-                )
-
-            # =================================================
-            # DIAGNOSTICS
-            # =================================================
-
-            diagnostics = res.get(
-                "diagnostics",
-                {},
-            )
-
-            funnel = diagnostics.get(
-                "funnel",
-                pd.DataFrame(),
-            )
-
-            gate_failures = diagnostics.get(
-                "gate_failures",
-                pd.DataFrame(),
-            )
-
-            near_misses = diagnostics.get(
-                "near_misses",
-                pd.DataFrame(),
-            )
-
-            st.divider()
-
-            st.subheader(
-                "BUY Confirmation Funnel"
-            )
-
-            if (
-                isinstance(
-                    funnel,
-                    pd.DataFrame,
-                )
-                and not funnel.empty
-            ):
-
-                st.dataframe(
-                    funnel,
-                    width="stretch",
-                    hide_index=True,
-                )
-
-            else:
-
-                st.info(
-                    "No funnel data available."
-                )
-
-            if (
-                isinstance(
-                    gate_failures,
-                    pd.DataFrame,
-                )
-                and not gate_failures.empty
-            ):
-
-                primary = gate_failures.iloc[
-                    0
-                ]
-
-                failed_count = safe_int(
-                    primary.get(
-                        "failed"
-                    )
-                )
-
-                failure_pct = safe_float(
-                    primary.get(
-                        "failure_percent",
-                        primary.get(
-                            "failure_rate_pct",
-                            0,
-                        ),
-                    )
-                )
-
-                st.info(
-                    f"Most frequently failed gate: "
-                    f"{primary.get('gate', 'Unknown')} failed for "
-                    f"{failed_count:,} observations "
-                    f"({failure_pct:.1f}%)."
-                )
-
-                st.markdown(
-                    "#### Most common failed BUY gates"
-                )
-
-                st.dataframe(
-                    gate_failures.head(
-                        12
-                    ),
-                    width="stretch",
-                    hide_index=True,
-                )
+        if isinstance(
+            near_misses,
+            pd.DataFrame,
+        ) and not near_misses.empty:
 
             st.markdown(
                 "#### Closest Near Misses"
             )
 
-            if (
-                isinstance(
-                    near_misses,
-                    pd.DataFrame,
-                )
-                and not near_misses.empty
-            ):
-
-                for _, near_miss in near_misses.head(
-                    5
-                ).iterrows():
-
-                    with st.container(
-                        border=True
-                    ):
-
-                        st.markdown(
-                            f"**{near_miss.get('symbol', 'N/A')} — "
-                            f"{near_miss.get('signal', 'N/A')}**"
-                        )
-
-                        st.write(
-                            f"Session: {near_miss.get('session', 'N/A')} | "
-                            f"Gates passed: "
-                            f"{near_miss.get('gates_passed', 'N/A')}"
-                        )
-
-                        st.write(
-                            f"Swing Score: "
-                            f"{safe_float(near_miss.get('swing_score')):.1f} | "
-                            f"Intraday Score: "
-                            f"{safe_float(near_miss.get('intraday_score')):.1f} | "
-                            f"Entry Quality: "
-                            f"{safe_float(near_miss.get('entry_quality')):.1f}/15"
-                        )
-
-                        st.warning(
-                            "Failed BUY gates: "
-                            f"{near_miss.get('failed_buy_gates', 'N/A')}"
-                        )
-
-                with st.expander(
-                    "Show full near-miss table"
-                ):
-
-                    st.dataframe(
-                        near_misses,
-                        width="stretch",
-                        hide_index=True,
-                    )
-
-            else:
-
-                st.info(
-                    "No near-miss observations available."
-                )
-
-            # =================================================
-            # EQUITY CURVE
-            # =================================================
-
-            equity = res.get(
-                "equity",
-                pd.DataFrame(),
+            st.dataframe(
+                near_misses.head(
+                    20
+                ),
+                width="stretch",
+                hide_index=True,
             )
 
-            if (
-                isinstance(
+        equity = result.get(
+            "equity",
+            pd.DataFrame(),
+        )
+
+        if (
+            isinstance(
+                equity,
+                pd.DataFrame,
+            )
+            and not equity.empty
+        ):
+
+            st.plotly_chart(
+                px.line(
                     equity,
-                    pd.DataFrame,
-                )
-                and not equity.empty
-            ):
-
-                st.plotly_chart(
-                    px.line(
-                        equity,
-                        x="date",
-                        y="equity",
-                        title="$2,000 Production Equity Curve",
-                    ),
-                    width="stretch",
-                )
-
-            # =================================================
-            # TRADES
-            # =================================================
-
-            st.subheader(
-                "Simulated Production Trades"
+                    x="date",
+                    y="equity",
+                    title="$2,000 Equity Curve",
+                ),
+                width="stretch",
             )
 
-            trades = res.get(
-                "trades",
+        trades = result.get(
+            "trades",
+            pd.DataFrame(),
+        )
+
+        st.subheader(
+            "Simulated Production Trades"
+        )
+
+        if isinstance(
+            trades,
+            pd.DataFrame,
+        ):
+
+            st.dataframe(
+                trades,
+                width="stretch",
+                hide_index=True,
+            )
+
+        with st.expander(
+            "Show Historical Signal Audit"
+        ):
+
+            signal_log = result.get(
+                "signal_log",
                 pd.DataFrame(),
             )
 
             if isinstance(
-                trades,
+                signal_log,
                 pd.DataFrame,
             ):
 
                 st.dataframe(
-                    trades,
+                    signal_log,
                     width="stretch",
                     hide_index=True,
                 )
 
-                if not trades.empty:
-
-                    st.download_button(
-                        "Download simulated trades",
-                        data=trades.to_csv(
-                            index=False
-                        ).encode(
-                            "utf-8"
-                        ),
-                        file_name="v3_8_production_trades.csv",
-                        mime="text/csv",
-                        width="stretch",
-                    )
-
-            # =================================================
-            # SIGNAL AUDIT
-            # =================================================
-
-            with st.expander(
-                "Show historical signal audit"
-            ):
-
-                signal_log = res.get(
-                    "signal_log",
-                    pd.DataFrame(),
-                )
-
-                st.caption(
-                    "Records reconstructed historical scanner observations, "
-                    "including observations that never became trades."
-                )
-
-                if isinstance(
-                    signal_log,
-                    pd.DataFrame,
-                ):
-
-                    st.dataframe(
-                        signal_log,
-                        width="stretch",
-                        hide_index=True,
-                    )
-
-                    if not signal_log.empty:
-
-                        st.download_button(
-                            "Download signal audit",
-                            data=signal_log.to_csv(
-                                index=False
-                            ).encode(
-                                "utf-8"
-                            ),
-                            file_name="v3_8_signal_audit.csv",
-                            mime="text/csv",
-                            width="stretch",
-                        )
-
 
 # ============================================================
-# CALIBRATION TAB
+# TAB 3 — CALIBRATION
 # ============================================================
 
 with tab3:
@@ -2927,24 +2572,18 @@ with tab3:
         "Calibration & Walk-Forward Validation"
     )
 
-    st.info(
-        "Calibration remains research-only. A promising threshold should "
-        "not replace the production strategy until it survives realistic "
-        "portfolio comparison and out-of-sample validation."
+    result = st.session_state.get(
+        "latest_backtest_result"
     )
 
-    result = (
-        st.session_state.latest_backtest_result
-    )
-
-    settings = (
-        st.session_state.latest_backtest_settings
+    settings = st.session_state.get(
+        "latest_backtest_settings"
     )
 
     if result is None:
 
         st.warning(
-            "Run a backtest first in the '$2,000 Swing Backtester' tab."
+            "Run the $2,000 backtest first."
         )
 
     else:
@@ -2959,94 +2598,141 @@ with tab3:
                     settings
                 )
 
-        try:
-
-            render_calibration_lab(
-                result
-            )
-
-        except Exception as exc:
-
-            st.error(
-                "Calibration encountered an error. "
-                "The production scanner is unaffected."
-            )
-
-            st.exception(
-                exc
-            )
+        render_calibration_lab(
+            result
+        )
 
 
 # ============================================================
-# v3.8 PRODUCTION-vs-CHALLENGER TAB
+# TAB 4 — v3.7 FORWARD RESEARCH
 # ============================================================
 
 with tab4:
+
+    st.subheader(
+        "v3.7 Gate Bottleneck + Forward Return Research"
+    )
+
+    if not V37_AVAILABLE:
+
+        st.error(
+            "The v3.7 research files could not be loaded."
+        )
+
+        if V37_IMPORT_ERROR:
+
+            st.code(
+                V37_IMPORT_ERROR
+            )
+
+    else:
+
+        result = st.session_state.get(
+            "latest_backtest_result"
+        )
+
+        daily_bars = st.session_state.get(
+            "latest_backtest_daily_bars"
+        )
+
+        if result is None:
+
+            st.warning(
+                "Run the $2,000 backtest first."
+            )
+
+        elif (
+            not isinstance(
+                daily_bars,
+                pd.DataFrame,
+            )
+            or daily_bars.empty
+        ):
+
+            st.warning(
+                "Historical daily bars are missing. "
+                "Run the backtest again."
+            )
+
+        else:
+
+            # Auto-build before rendering.
+            enriched = (
+                build_v37_dataset_if_possible()
+            )
+
+            if (
+                isinstance(
+                    enriched,
+                    pd.DataFrame,
+                )
+                and not enriched.empty
+            ):
+
+                st.success(
+                    f"Forward-return dataset ready: "
+                    f"{len(enriched):,} observations."
+                )
+
+            try:
+
+                render_forward_research_lab(
+                    result,
+                    daily_bars,
+                )
+
+            except Exception as exc:
+
+                st.error(
+                    "v3.7 Forward Research encountered an error."
+                )
+
+                st.exception(
+                    exc
+                )
+
+
+# ============================================================
+# TAB 5 — v3.8 PRODUCTION VS CHALLENGER
+# ============================================================
+
+with tab5:
 
     st.subheader(
         "v3.8 Production-vs-Challenger Portfolio Validation"
     )
 
     st.caption(
-        "Research only. Challenger results do not automatically alter "
-        "the live production BUY rules."
+        "Research only. Challenger results do not automatically "
+        "alter the production BUY rules."
     )
 
     st.info(
-        "The purpose of v3.8 is to stop judging a strategy only by "
-        "individual forward returns. Production and Challenger must be "
-        "tested as actual competing portfolios under the same capital, "
-        "position limits, holding rules, slippage, fees and historical sample."
+        "v3.8 compares the current production control with bounded "
+        "challenger rules using the same historical sample and "
+        "portfolio constraints."
     )
 
-    result = (
-        st.session_state.latest_backtest_result
+    result = st.session_state.get(
+        "latest_backtest_result"
     )
 
-    daily_bars = (
-        st.session_state.latest_backtest_daily_bars
+    daily_bars = st.session_state.get(
+        "latest_backtest_daily_bars"
     )
 
-    market_daily = (
-        st.session_state.latest_backtest_market_daily
+    settings = st.session_state.get(
+        "latest_backtest_settings"
     )
 
-    settings = (
-        st.session_state.latest_backtest_settings
-    )
-
-    if not V38_VALIDATION_AVAILABLE:
+    if result is None:
 
         st.warning(
-            "The main scanner is running normally, but the v3.8 "
-            "Production-vs-Challenger UI module was not detected."
-        )
-
-        st.caption(
-            "This protection prevents an optional research-file problem "
-            "from crashing the Live Scanner or Backtester."
-        )
-
-        if V38_IMPORT_ERROR:
-
-            with st.expander(
-                "Show v3.8 module detection details"
-            ):
-
-                st.code(
-                    V38_IMPORT_ERROR
-                )
-
-    elif result is None:
-
-        st.warning(
-            "Run the $2,000 backtest first. v3.8 needs the completed "
-            "historical signal audit and portfolio settings."
+            "Run the $2,000 backtest first."
         )
 
     elif (
-        daily_bars is None
-        or not isinstance(
+        not isinstance(
             daily_bars,
             pd.DataFrame,
         )
@@ -3054,39 +2740,93 @@ with tab4:
     ):
 
         st.warning(
-            "This saved backtest does not contain the historical daily "
-            "bars needed by v3.8."
+            "Historical daily bars are missing. "
+            "Run the backtest again."
         )
 
-        st.info(
-            "Return to the $2,000 Swing Backtester and run it one more time."
+    elif not V38_AVAILABLE:
+
+        st.error(
+            "production_vs_challenger_ui.py "
+            "could not be imported."
         )
+
+        if V38_IMPORT_ERROR:
+
+            with st.expander(
+                "Show v3.8 import error"
+            ):
+
+                st.code(
+                    V38_IMPORT_ERROR
+                )
 
     else:
 
-        signal_log = result.get(
-            "signal_log",
-            pd.DataFrame(),
+        # ----------------------------------------------------
+        # THIS IS THE FIX FOR THE SCREEN YOU SHOWED ME.
+        # v3.8 no longer depends on you manually finding and
+        # pressing a hidden v3.7 button first.
+        # ----------------------------------------------------
+
+        enriched = (
+            build_v37_dataset_if_possible()
         )
 
         if (
             not isinstance(
-                signal_log,
+                enriched,
                 pd.DataFrame,
             )
-            or signal_log.empty
+            or enriched.empty
         ):
 
             st.warning(
-                "The completed backtest does not contain a usable "
-                "historical signal audit."
+                "The forward-return audit has not been created yet."
             )
+
+            if st.button(
+                "PREPARE v3.8 RESEARCH DATASET",
+                type="primary",
+                width="stretch",
+                key="prepare_v38_dataset",
+            ):
+
+                with st.spinner(
+                    "Building forward-return audit for v3.8..."
+                ):
+
+                    enriched = (
+                        build_v37_dataset_if_possible()
+                    )
+
+                if (
+                    isinstance(
+                        enriched,
+                        pd.DataFrame,
+                    )
+                    and not enriched.empty
+                ):
+
+                    st.success(
+                        f"v3.8 dataset prepared: "
+                        f"{len(enriched):,} observations."
+                    )
+
+                    st.rerun()
+
+                else:
+
+                    st.error(
+                        "The enriched dataset could not be built. "
+                        "Open the v3.7 tab to view the underlying error."
+                    )
 
         else:
 
             st.success(
                 f"v3.8 dataset ready: "
-                f"{len(signal_log):,} historical scanner observations."
+                f"{len(enriched):,} historical scanner observations."
             )
 
             c1, c2, c3 = st.columns(
@@ -3095,7 +2835,7 @@ with tab4:
 
             c1.metric(
                 "Signal observations",
-                f"{len(signal_log):,}",
+                f"{len(enriched):,}",
             )
 
             c2.metric(
@@ -3103,16 +2843,18 @@ with tab4:
                 f"{len(daily_bars):,}",
             )
 
+            symbol_count = (
+                enriched[
+                    "symbol"
+                ].nunique()
+                if "symbol"
+                in enriched.columns
+                else 0
+            )
+
             c3.metric(
                 "Symbols",
-                (
-                    signal_log[
-                        "symbol"
-                    ].nunique()
-                    if "symbol"
-                    in signal_log.columns
-                    else 0
-                ),
+                f"{symbol_count:,}",
             )
 
             if settings:
@@ -3125,32 +2867,14 @@ with tab4:
                         settings
                     )
 
-            if V38_MODULE_NAME:
+            st.divider()
 
-                st.caption(
-                    f"v3.8 UI loaded from: {V38_MODULE_NAME}.py"
-                )
-
-            try:
-
-                call_v38_validation_ui(
-                    result,
-                    daily_bars,
-                    market_daily,
-                    settings,
-                )
-
-            except Exception as exc:
-
-                st.error(
-                    "The v3.8 module loaded, but the portfolio-validation "
-                    "screen encountered an error. The production scanner "
-                    "and backtester remain unchanged."
-                )
-
-                st.exception(
-                    exc
-                )
+            call_v38_ui(
+                result=result,
+                enriched=enriched,
+                daily_bars=daily_bars,
+                settings=settings,
+            )
 
 
 # ============================================================
@@ -3160,10 +2884,10 @@ with tab4:
 st.divider()
 
 st.warning(
-    "Research only. Scanner signals, backtests, calibration results and "
-    "Production-vs-Challenger comparisons do not guarantee future returns. "
-    "Do not promote a Challenger into production because it wins one historical "
-    "sample. Require repeated performance across non-overlapping periods, "
-    "adequate trade counts, realistic costs, acceptable drawdowns and paper "
-    "trading before risking real capital."
+    "Research only. Scanner signals, backtests, calibration, "
+    "forward-return studies and Production-vs-Challenger comparisons "
+    "do not guarantee future returns. Do not promote a Challenger into "
+    "production because it wins one historical sample. Require repeated "
+    "out-of-sample performance, adequate trade counts, realistic costs, "
+    "acceptable drawdowns and paper trading before risking real capital."
 )
