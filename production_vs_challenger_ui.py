@@ -191,3 +191,4 @@ def render_production_vs_challenger_lab(enriched_signal_log: pd.DataFrame):
     st.divider()
     st.download_button("Download v3.8 profile summary", data=summary.to_csv(index=False).encode("utf-8"), file_name="v3_8_production_vs_challenger_summary.csv", mime="text/csv", width="stretch")
     st.warning("v3.8 is still research. A challenger should not replace production until it shows durable out-of-sample improvement, adequate sample size, acceptable drawdown, and then survives paper trading.")
+p
